@@ -2,14 +2,16 @@ name: Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 jobs:
   deploy-backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: bervProject/railway-deploy@main
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         with:
-          railway_token: ${{ secrets.RAILWAY_TOKEN }}
           service: google-agent-api
   deploy-web:
     runs-on: ubuntu-latest
