@@ -27,6 +27,8 @@ async def token(req: TokenRequest):
     return {"access_token":create_token(req.email),"token_type":"bearer"}
 
 async def auth_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
     protected = request.url.path.startswith(("/chat","/feedback","/history","/admin"))
     if not protected:
         return await call_next(request)

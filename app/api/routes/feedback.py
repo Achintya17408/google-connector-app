@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -18,7 +20,7 @@ async def feedback(req: FeedbackRequest, request: Request):
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
         assistant = await conn.fetchrow(
-            """SELECT content,created_at FROM conversation_history
+            """SELECT content,created_at,tool_results FROM conversation_history
                WHERE session_id=$1 AND role='assistant'
                ORDER BY created_at DESC LIMIT 1""",
             req.session_id,
@@ -37,15 +39,19 @@ async def feedback(req: FeedbackRequest, request: Request):
                WHERE session_id=$1 ORDER BY assigned_at DESC LIMIT 1""",
             req.session_id,
         )
+        retrieved_docs = assistant["tool_results"] or []
+        if isinstance(retrieved_docs, str):
+            retrieved_docs = json.loads(retrieved_docs)
         await conn.execute(
             """INSERT INTO feedback
-               (session_id,user_id,user_question,agent_response,rating,
-                prompt_id,assignment_id)
-               VALUES($1,$2,$3,$4,$5,$6,$7)""",
+               (session_id,user_id,user_question,agent_response,retrieved_docs,
+                rating,prompt_id,assignment_id)
+               VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8)""",
             req.session_id,
             request.state.user_id,
             question,
             assistant["content"],
+            json.dumps(retrieved_docs, default=str),
             req.rating,
             assignment["prompt_id"] if assignment else None,
             assignment["id"] if assignment else None,

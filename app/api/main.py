@@ -32,7 +32,17 @@ async def lifespan(app):
         scheduler.shutdown(wait=False)
     await close_pool()
 app=FastAPI(title="Google Workspace AI Agent",lifespan=lifespan)
-app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:3000","http://127.0.0.1:3000"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip() for origin in get_settings().cors_origins.split(",")
+        if origin.strip()
+    ],
+    allow_origin_regex=r"https://[a-zA-Z0-9-]+\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.middleware("http")(metrics_middleware)
 app.middleware("http")(auth_middleware)
 app.include_router(auth_router); app.include_router(chat.router); app.include_router(feedback.router); app.include_router(history.router); app.include_router(admin.router)

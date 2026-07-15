@@ -30,6 +30,8 @@ async def chat(req: ChatRequest, request: Request):
         started = time.perf_counter()
         final = ""
         model_used = ""
+        retrieved_docs = []
+        tool_results = []
         task_complete = False
         error_type = None
         async with pool.acquire() as conn:
@@ -54,9 +56,14 @@ async def chat(req: ChatRequest, request: Request):
             }
             config = {"configurable": {"thread_id": req.session_id}}
             async for update in graph.astream(initial, config=config):
-                for node_output in update.values():
+                for node_name, node_output in update.items():
                     if not isinstance(node_output, dict):
                         continue
+                    node_results = node_output.get("tool_results")
+                    if node_name == "retrieve_context" and isinstance(node_results, list):
+                        retrieved_docs = node_results
+                    elif isinstance(node_results, list):
+                        tool_results.extend(node_results)
                     model_used = node_output.get("model_to_use", model_used)
                     output = node_output.get("output")
                     if output and output != final:
@@ -67,11 +74,14 @@ async def chat(req: ChatRequest, request: Request):
             async with pool.acquire() as conn:
                 await conn.execute(
                     """INSERT INTO conversation_history
-                       (session_id,user_id,role,content,model_used)
-                       VALUES($1,$2,'assistant',$3,$4)""",
+                       (session_id,user_id,role,content,tool_calls,tool_results,
+                        model_used)
+                       VALUES($1,$2,'assistant',$3,$4::jsonb,$5::jsonb,$6)""",
                     req.session_id,
                     request.state.user_id,
                     final,
+                    json.dumps(tool_results, default=str),
+                    json.dumps(retrieved_docs, default=str),
                     model_used,
                 )
         except Exception as exc:

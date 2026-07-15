@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     admin_emails: str = "achintyat256@gmail.com"
     railway_url: str = ""
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     neon_database_url: str = ""
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
