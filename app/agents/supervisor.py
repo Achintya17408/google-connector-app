@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import time
@@ -79,7 +80,10 @@ def get_toolsets() -> dict[str, list[BaseTool]]:
 
 async def retrieve_context_node(state: AgentState):
     try:
-        docs = await hybrid_retrieve(state.get("message", ""))
+        # Railway's small Ollama service can take over a minute to cold-start.
+        # RAG is optional context, so never let a cold embedding model block chat.
+        async with asyncio.timeout(20):
+            docs = await hybrid_retrieve(state.get("message", ""))
     except Exception as exc:
         docs = []
         return {"retrieved_context": "", "tool_results": [], "error": str(exc)}
