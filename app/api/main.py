@@ -4,6 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 from app.agents.supervisor import build_agent_graph
 from app.config.settings import get_settings
 from app.db.connection import close_pool,get_pool
@@ -28,7 +30,20 @@ async def lifespan(app):
         os.environ["LANGSMITH_API_KEY"] = langsmith_key
     pool=await get_pool()
     setup_scheduler(pool,NomicEmbedder())
-    async with AsyncPostgresSaver.from_conn_string(settings.database_url) as checkpointer:
+    # A single long-lived connection is unsafe with serverless Postgres providers
+    # such as Neon: the provider may retire it while the Railway process stays up.
+    # The pool validates borrowed connections and transparently replaces stale ones.
+    async with AsyncConnectionPool(
+        conninfo=settings.database_url,
+        min_size=1,
+        max_size=5,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        check=AsyncConnectionPool.check_connection,
+        max_idle=300,
+        max_lifetime=1800,
+        reconnect_timeout=60,
+    ) as checkpoint_pool:
+        checkpointer = AsyncPostgresSaver(checkpoint_pool)
         await checkpointer.setup()
         app.state.agent_graph = build_agent_graph(pool, checkpointer)
         yield
