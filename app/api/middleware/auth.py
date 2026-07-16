@@ -79,18 +79,24 @@ def _safe_return_to(value: str | None):
 async def google_login(return_to: str | None = Query(default=None)):
     settings = get_settings()
     destination = _safe_return_to(return_to)
+    code_verifier = secrets.token_urlsafe(96)
     state = jwt.encode(
         {
             "purpose": "google-oauth",
             "return_to": destination,
             "nonce": secrets.token_urlsafe(24),
+            "code_verifier": code_verifier,
             "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
         },
         settings.jwt_secret_key,
         algorithm=settings.jwt_algorithm,
     )
     flow = Flow.from_client_config(
-        _client_config(), scopes=OAUTH_SCOPES, redirect_uri=_callback_url()
+        _client_config(),
+        scopes=OAUTH_SCOPES,
+        redirect_uri=_callback_url(),
+        code_verifier=code_verifier,
+        autogenerate_code_verifier=False,
     )
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
@@ -113,8 +119,13 @@ async def google_callback(code: str, state: str):
             raise JWTError("invalid purpose")
         return_to = _safe_return_to(state_data.get("return_to"))
         config = _client_config()
+        code_verifier = state_data["code_verifier"]
         flow = Flow.from_client_config(
-            config, scopes=OAUTH_SCOPES, redirect_uri=_callback_url()
+            config,
+            scopes=OAUTH_SCOPES,
+            redirect_uri=_callback_url(),
+            code_verifier=code_verifier,
+            autogenerate_code_verifier=False,
         )
         flow.fetch_token(code=code)
         identity = id_token.verify_oauth2_token(
