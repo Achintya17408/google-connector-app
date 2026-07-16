@@ -1,6 +1,7 @@
 import os
 import pickle
 import json
+from contextvars import ContextVar
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -35,6 +36,9 @@ def _load_creds():
     return creds
 
 _creds = _load_creds()
+request_google_credentials: ContextVar[Credentials | None] = ContextVar(
+    "request_google_credentials", default=None
+)
 class _MissingCredentialsService:
     def __init__(self, api):
         self.api = api
@@ -45,10 +49,26 @@ class _MissingCredentialsService:
         )
 
 
+class _UserScopedService:
+    def __init__(self, name, version):
+        self.name = name
+        self.version = version
+
+    def __getattr__(self, attribute):
+        credentials = request_google_credentials.get() or _creds
+        if credentials is None:
+            return getattr(_MissingCredentialsService(self.name), attribute)
+        service = build(
+            self.name,
+            self.version,
+            credentials=credentials,
+            cache_discovery=False,
+        )
+        return getattr(service, attribute)
+
+
 def _service(name, version):
-    if _creds is None:
-        return _MissingCredentialsService(name)
-    return build(name, version, credentials=_creds, cache_discovery=False)
+    return _UserScopedService(name, version)
 
 gmail_service = _service("gmail", "v1")
 calendar_service = _service("calendar", "v3")

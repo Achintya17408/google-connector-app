@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     google_credentials_path: str = "./credentials.json"
     google_token_path: str = "./token.pkl"
     google_token_json: str = ""
+    google_oauth_client_json: str = ""
+    google_oauth_client_path: str = "./google-oauth-web.json"
+    frontend_url: str = "http://localhost:3000"
+    allow_dev_auth: bool = False
     jwt_secret_key: str = "change-this-in-production-use-256-bit-random-string"
     jwt_algorithm: str = "HS256"
     admin_emails: str = "achintyat256@gmail.com"

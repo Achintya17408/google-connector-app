@@ -2,11 +2,14 @@ import asyncio
 import json
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.db.connection import get_pool
+from app.db.google_clients import request_google_credentials
+from app.db.oauth_credentials import load_google_credentials
+from app.config.settings import get_settings
 from app.db.prompt_service import get_prompt, record_metric
 
 router = APIRouter()
@@ -30,6 +33,9 @@ def classify_graph_results(node_output: dict) -> tuple[list | None, list | None]
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     pool = await get_pool()
+    google_credentials = await load_google_credentials(pool, request.state.user_id)
+    if google_credentials is None and not get_settings().allow_dev_auth:
+        raise HTTPException(403, "Connect your Google account before chatting")
     prompt, assignment_id = await get_prompt(
         "supervisor_system", req.session_id, pool=pool
     )
@@ -54,6 +60,7 @@ async def chat(req: ChatRequest, request: Request):
                 req.message,
             )
         try:
+            credential_token = request_google_credentials.set(google_credentials)
             graph = request.app.state.agent_graph
             initial = {
                 "message": req.message,
@@ -99,6 +106,8 @@ async def chat(req: ChatRequest, request: Request):
             final = f"I couldn't complete that request: {exc}"
             yield f"data: {json.dumps({'token': final, 'done': False})}\n\n"
         finally:
+            if "credential_token" in locals():
+                request_google_credentials.reset(credential_token)
             total_ms = int((time.perf_counter() - started) * 1000)
             asyncio.create_task(
                 record_metric(
