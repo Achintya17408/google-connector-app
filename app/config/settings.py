@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     groq_api_key: str = ""
-    groq_fast_model: str = "qwen/qwen3.6-27b"
+    groq_fast_model: str = "llama-3.3-70b-versatile"
     groq_reasoning_model: str = "openai/gpt-oss-120b"
     database_url: str = "postgresql://agent_user:agent_pass_2024@localhost:5432/agent_db"
     async_database_url: str = "postgresql+asyncpg://agent_user:agent_pass_2024@localhost:5432/agent_db"
