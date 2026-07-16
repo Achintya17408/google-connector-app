@@ -6,6 +6,7 @@ from app.rag.context_packer import pack_context
 from app.agents.router import route_model_node
 from app.agents.supervisor import make_service_node, supervisor_node
 from app.api.middleware.auth import create_token
+from app.api.routes.chat import classify_graph_results
 from jose import jwt
 from app.config.settings import get_settings
 
@@ -15,6 +16,18 @@ def test_context_packer_orders_by_score():
         {"source": "high", "content": "first", "score": 0.9},
     ])
     assert text.index("first") < text.index("second")
+
+
+def test_graph_results_distinguish_retrieval_from_tool_execution():
+    documents = [{"source": "gmail", "content": "Budget", "score": 0.9}]
+    assert classify_graph_results({
+        "retrieved_context": "Budget",
+        "tool_results": documents,
+    }) == (documents, None)
+    assert classify_graph_results({
+        "output": "Done",
+        "tool_results": [{"message_id": "123"}],
+    }) == (None, [{"message_id": "123"}])
 
 @pytest.mark.asyncio
 async def test_model_router():

@@ -17,6 +17,16 @@ class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
 
 
+def classify_graph_results(node_output: dict) -> tuple[list | None, list | None]:
+    """Separate RAG documents from results returned by executed tools."""
+    results = node_output.get("tool_results")
+    if not isinstance(results, list):
+        return None, None
+    if "retrieved_context" in node_output:
+        return results, None
+    return None, results
+
+
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     pool = await get_pool()
@@ -56,14 +66,14 @@ async def chat(req: ChatRequest, request: Request):
             }
             config = {"configurable": {"thread_id": req.session_id}}
             async for update in graph.astream(initial, config=config):
-                for node_name, node_output in update.items():
+                for _node_name, node_output in update.items():
                     if not isinstance(node_output, dict):
                         continue
-                    node_results = node_output.get("tool_results")
-                    if node_name == "retrieve_context" and isinstance(node_results, list):
-                        retrieved_docs = node_results
-                    elif isinstance(node_results, list):
-                        tool_results.extend(node_results)
+                    retrieved, executed = classify_graph_results(node_output)
+                    if retrieved is not None:
+                        retrieved_docs = retrieved
+                    if executed is not None:
+                        tool_results.extend(executed)
                     model_used = node_output.get("model_to_use", model_used)
                     output = node_output.get("output")
                     if output and output != final:

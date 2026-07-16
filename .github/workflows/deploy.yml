@@ -12,7 +12,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         with:
-          service: google-agent-api
+          service: google-connector-app
   deploy-web:
     runs-on: ubuntu-latest
     steps:
