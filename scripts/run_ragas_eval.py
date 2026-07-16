@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from datasets import Dataset
 from langchain_community.embeddings import OllamaEmbeddings
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_groq import ChatGroq
 from ragas import evaluate
 from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -39,6 +40,12 @@ async def main():
                 model=settings.groq_fallback_model,
                 api_key=settings.groq_api_key,
                 temperature=0,
+                max_retries=5,
+                rate_limiter=InMemoryRateLimiter(
+                    requests_per_second=0.08,
+                    check_every_n_seconds=0.1,
+                    max_bucket_size=1,
+                ),
             )
         )
         evaluator_embeddings = LangchainEmbeddingsWrapper(
@@ -63,7 +70,7 @@ async def main():
             metrics=metrics,
             llm=evaluator_llm,
             embeddings=evaluator_embeddings,
-            run_config=RunConfig(timeout=600, max_retries=5, max_workers=2),
+            run_config=RunConfig(timeout=600, max_retries=5, max_workers=1),
             raise_exceptions=True,
         )
         frame = scores.to_pandas()
