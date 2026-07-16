@@ -159,7 +159,13 @@ def make_service_node(service: str, pool=None):
             ]
             results = []
             for _ in range(8):
-                response = await llm.ainvoke(messages)
+                for attempt in range(2):
+                    try:
+                        response = await llm.ainvoke(messages)
+                        break
+                    except Exception as exc:
+                        if attempt or "tool_use_failed" not in str(exc):
+                            raise
                 messages.append(response)
                 calls = getattr(response, "tool_calls", [])
                 if not calls:

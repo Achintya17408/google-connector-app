@@ -81,6 +81,38 @@ async def test_service_node_executes_tool(monkeypatch):
     assert result["task_complete"] is True
 
 
+@pytest.mark.asyncio
+async def test_service_node_retries_rejected_groq_tool_generation(monkeypatch):
+    @tool(description="Echo a value")
+    def echo(value: str):
+        return {"echo": value}
+
+    class FlakyLLM:
+        calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("tool_use_failed")
+            return AIMessage(content="recovered")
+
+    monkeypatch.setattr(
+        "app.agents.supervisor.get_toolsets", lambda: {"gmail": [echo]}
+    )
+    monkeypatch.setattr("app.agents.supervisor.get_llm", lambda _: FlakyLLM())
+    result = await make_service_node("gmail")({
+        "message": "echo",
+        "model_to_use": "groq_fast",
+        "services": ["gmail"],
+        "session_id": "test",
+    })
+    assert result["output"] == "recovered"
+    assert result["task_complete"] is True
+
+
 def test_admin_claim_is_derived_from_email():
     settings = get_settings()
     admin = jwt.decode(
