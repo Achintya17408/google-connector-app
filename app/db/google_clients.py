@@ -3,6 +3,7 @@ import pickle
 import json
 from contextvars import ContextVar
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from app.config.settings import get_settings
@@ -22,8 +23,11 @@ SCOPES = [
 def _load_creds():
     settings = get_settings()
     if settings.google_token_json:
+        # This is a legacy single-user fallback. Never expand its scopes during
+        # refresh: Google requires a new interactive consent grant for added
+        # scopes such as Meet. Production requests use per-user OAuth instead.
         creds = Credentials.from_authorized_user_info(
-            json.loads(settings.google_token_json), SCOPES
+            json.loads(settings.google_token_json)
         )
     elif os.path.exists(settings.google_token_path):
         with open(settings.google_token_path, "rb") as fh:
@@ -31,7 +35,12 @@ def _load_creds():
     else:
         return None
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except RefreshError:
+            # A stale optional fallback must not prevent the API from starting.
+            # The request-scoped OAuth flow will ask the user to reconnect.
+            return None
         if not settings.google_token_json:
             with open(settings.google_token_path, "wb") as fh:
                 pickle.dump(creds, fh)
