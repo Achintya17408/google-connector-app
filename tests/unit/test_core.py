@@ -1,10 +1,15 @@
 import pytest
+import importlib
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 
 from app.rag.context_packer import pack_context
 from app.agents.router import route_model_node
-from app.agents.supervisor import make_service_node, supervisor_node
+from app.agents.supervisor import (
+    make_service_node,
+    recover_rejected_tool_call,
+    supervisor_node,
+)
 from app.api.middleware.auth import create_token
 from app.api.routes.chat import classify_graph_results
 from jose import jwt
@@ -18,6 +23,17 @@ def test_context_packer_orders_by_score():
     assert text.index("first") < text.index("second")
 
 
+@pytest.mark.parametrize(
+    "service",
+    ["gmail", "calendar", "drive", "docs", "sheets", "tasks", "chat", "contacts"],
+)
+def test_service_subgraph_module_exports_callable(service):
+    module = importlib.import_module(f"app.agents.subagents.{service}_agent")
+    node = getattr(module, f"{service}_subgraph")
+    assert callable(node)
+    assert node.__name__ == f"{service}_agent"
+
+
 def test_graph_results_distinguish_retrieval_from_tool_execution():
     documents = [{"source": "gmail", "content": "Budget", "score": 0.9}]
     assert classify_graph_results({
@@ -28,6 +44,21 @@ def test_graph_results_distinguish_retrieval_from_tool_execution():
         "output": "Done",
         "tool_results": [{"message_id": "123"}],
     }) == (None, [{"message_id": "123"}])
+
+
+def test_recover_rejected_groq_tool_call():
+    error = RuntimeError(
+        "tool_use_failed failed_generation="
+        "<function=search_gmail{\"query\":\"budget meeting\",\"max_results\":10}"
+        "</function>"
+    )
+    recovered = recover_rejected_tool_call(error)
+    assert recovered is not None
+    assert recovered.tool_calls[0]["name"] == "search_gmail"
+    assert recovered.tool_calls[0]["args"] == {
+        "query": "budget meeting",
+        "max_results": 10,
+    }
 
 @pytest.mark.asyncio
 async def test_model_router():

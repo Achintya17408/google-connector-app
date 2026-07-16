@@ -3,7 +3,15 @@ services:
     build: .
     ports: ["8000:8000"]
     env_file: .env
-    depends_on: [postgres, ollama]
+    environment:
+      DATABASE_URL: postgresql://agent_user:agent_pass_2024@postgres:5432/agent_db
+      ASYNC_DATABASE_URL: postgresql+asyncpg://agent_user:agent_pass_2024@postgres:5432/agent_db
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -12,10 +20,27 @@ services:
       POSTGRES_PASSWORD: agent_pass_2024
     ports: ["5432:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent_user -d agent_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   ollama:
     image: ollama/ollama
     ports: ["11434:11434"]
     volumes: [ollama_data:/root/.ollama]
+  ollama-init:
+    image: ollama/ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until ollama list >/dev/null 2>&1; do sleep 2; done;
+        ollama pull nomic-embed-text
+    depends_on:
+      ollama:
+        condition: service_started
 volumes:
   postgres_data:
   ollama_data:

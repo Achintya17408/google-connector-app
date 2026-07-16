@@ -1,3 +1,5 @@
-from app.agents.supervisor import service_node as chat_subgraph
+from app.agents.supervisor import make_service_node
+
+chat_subgraph = make_service_node("chat")
 
 __all__ = ["chat_subgraph"]

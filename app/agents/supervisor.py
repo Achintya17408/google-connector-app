@@ -1,8 +1,10 @@
 import json
+import re
 import time
+import uuid
 from collections.abc import Sequence
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
 
@@ -25,6 +27,32 @@ ALIASES = {
     "task": "tasks",
     "contact": "contacts",
 }
+
+FAILED_TOOL_PATTERN = re.compile(
+    r"<function=([A-Za-z0-9_]+)(\{.*?\})</function>", re.DOTALL
+)
+
+
+def recover_rejected_tool_call(exc: Exception) -> AIMessage | None:
+    """Recover the structured call Groq includes with tool_use_failed errors."""
+    match = FAILED_TOOL_PATTERN.search(str(exc))
+    if not match:
+        return None
+    try:
+        arguments = json.loads(match.group(2))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(arguments, dict):
+        return None
+    return AIMessage(
+        content="",
+        tool_calls=[{
+            "name": match.group(1),
+            "args": arguments,
+            "id": f"recovered-{uuid.uuid4()}",
+            "type": "tool_call",
+        }],
+    )
 
 
 def get_toolsets() -> dict[str, list[BaseTool]]:
@@ -164,8 +192,12 @@ def make_service_node(service: str, pool=None):
                         response = await llm.ainvoke(messages)
                         break
                     except Exception as exc:
-                        if attempt or "tool_use_failed" not in str(exc):
+                        if "tool_use_failed" not in str(exc):
                             raise
+                        if attempt:
+                            response = recover_rejected_tool_call(exc)
+                            if response is None:
+                                raise
                 messages.append(response)
                 calls = getattr(response, "tool_calls", [])
                 if not calls:

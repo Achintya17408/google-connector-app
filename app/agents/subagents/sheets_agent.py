@@ -1,3 +1,5 @@
-from app.agents.supervisor import service_node as sheets_subgraph
+from app.agents.supervisor import make_service_node
+
+sheets_subgraph = make_service_node("sheets")
 
 __all__ = ["sheets_subgraph"]
