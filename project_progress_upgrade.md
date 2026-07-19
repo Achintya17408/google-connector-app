@@ -282,7 +282,7 @@ Guardrail: disconnect/restart tests prove the worker continues and writes are no
 ## Sprint 14 — Frontend run and admin experience
 
 - [ ] Add live plan/current/completed/pending steps, progress, heartbeat, fallback, clarification, and approval UI.
-- [ ] Reconnect/resume by run ID and preserve partial verified artifacts.
+- [x] Reconnect/resume by run ID and preserve partial verified artifacts.
 - [ ] Show concise user failure plus authorized detailed administrator diagnosis.
 - [ ] Add history filters by session/status/user/service/model/failure/time/version.
 - [~] Add protected Admin Improvement Center with evidence, diffs, evaluations, risk, privacy, rollback, approve-canary/change/reject/promote actions, expiry, audit, and step-up approval.
@@ -404,3 +404,4 @@ After implementation and verification, teach through this repository:
 - 2026-07-19: Applied the reversible legacy import for the documented original owner: 14,521 tenant-scoped chunks (1,152 Gmail, 13,367 Drive, 2 Calendar). A live hybrid query returned owner results while the same query for an unrelated user returned zero, proving cross-user isolation.
 - 2026-07-19: Replaced generic service execution steps with explicit validated operations and per-step tool allowlists, while preserving mixed-workflow dependencies and read retry semantics. Added verified Drive trash support. Deploy workflow now labels API and worker with the exact Git commit automatically.
 - 2026-07-19: Added a deterministic no-network Google Workspace mutation simulator and versioned replay suite covering idempotency, dependency propagation, retry, partial completion, breaking-point detection, and compensation; wired it into backend CI.
+- 2026-07-19: Made the browser restore active durable runs after refresh, resume failed/partial runs from the failed step, and retain/show verified artifact links even when a later workflow step fails.

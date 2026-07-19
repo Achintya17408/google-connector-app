@@ -1,17 +1,18 @@
 "use client";
 
-import {useRef,useState} from "react";
+import {useEffect,useRef,useState} from "react";
 
 export type Message={role:"user"|"assistant";content:string};
 export type CurrentUser={email:string;admin?:boolean;google_connected:boolean;missing_scopes?:string[]};
 export type RunStep={id:string;title:string;status:string;risk_level:string;requires_approval:boolean};
 export type RunApproval={action_hash:string;action_summary:Record<string,unknown>;expires_at:string;status:string};
+export type RunArtifact={id:string;artifact_type:string;external_id:string;url?:string;verification_status:string;cleanup_state:string};
 export type AgentRun={
   id:string;status:string;current_phase:string;technical_completion:number;
   functional_completion:number;user_visible_completion:number;side_effect_integrity:number;
   result?:{output?:string};incident_summary?:{breaking_point?:string;primary_cause?:string;error?:string};
   clarification_questions?:string[];
-  steps:RunStep[];approval?:RunApproval|null;
+  steps:RunStep[];artifacts:RunArtifact[];approval?:RunApproval|null;
 };
 export const API=process.env.NEXT_PUBLIC_API_URL??"http://localhost:8000";
 
@@ -44,6 +45,7 @@ export function useChat(sessionId:string){
   const [error,setError]=useState("");
   const [currentRun,setCurrentRun]=useState<AgentRun|null>(null);
   const activeRun=useRef<string|null>(null);
+  const storageKey=`agent_active_run:${sessionId}`;
 
   const authHeaders=()=>{
     const token=getToken();
@@ -72,16 +74,54 @@ export function useChat(sessionId:string){
 
   const monitor=async(runId:string)=>{
     activeRun.current=runId;
+    localStorage.setItem(storageKey,runId);
     while(activeRun.current===runId){
       const run=await loadRun(runId);
       setCurrentRun(run);
       if(["completed","failed","partial","cancelled"].includes(run.status)){
-        showFinal(run);activeRun.current=null;setStreaming(false);return;
+        showFinal(run);activeRun.current=null;localStorage.removeItem(storageKey);
+        setStreaming(false);return;
       }
       if(["awaiting_approval","awaiting_clarification"].includes(run.status)){setStreaming(false);return;}
       await new Promise(resolve=>setTimeout(resolve,1500));
     }
   };
+
+  useEffect(()=>{
+    if(!sessionId||!getToken())return;
+    let disposed=false;
+    const restore=async()=>{
+      try{
+        let runId=localStorage.getItem(storageKey);
+        if(!runId){
+          const response=await fetch(`${API}/sessions/${encodeURIComponent(sessionId)}/runs`,{
+            headers:{Authorization:`Bearer ${getToken()??""}`},
+          });
+          if(response.ok){
+            const data=await response.json() as {runs:Array<{id:string;status:string}>};
+            runId=data.runs.find(item=>!["completed","failed","partial","cancelled"].includes(item.status))?.id??null;
+          }
+        }
+        if(!runId||disposed)return;
+        const run=await loadRun(runId);
+        if(disposed)return;
+        setCurrentRun(run);
+        if(["queued","running"].includes(run.status)){
+          setStreaming(true);void monitor(runId).catch(value=>{
+            if(!disposed){setError(value instanceof Error?value.message:"Unable to reconnect to run");setStreaming(false);}
+          });
+        }else if(["completed","failed","partial","cancelled"].includes(run.status)){
+          localStorage.removeItem(storageKey);
+        }
+      }catch(value){
+        if(!disposed)setError(value instanceof Error?value.message:"Unable to restore active run");
+      }
+    };
+    void restore();
+    return()=>{disposed=true;activeRun.current=null};
+    // The run monitor deliberately restarts only when the durable session changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[sessionId,storageKey]);
 
   const sendMessage=async(content:string)=>{
     setError("");setStreaming(true);
@@ -93,10 +133,11 @@ export function useChat(sessionId:string){
         throw new Error(detail.detail??`Request failed (${response.status})`);
       }
       const created=await response.json() as {run_id:string};
+      localStorage.setItem(storageKey,created.run_id);
       const run=await loadRun(created.run_id);setCurrentRun(run);
       if(!["awaiting_approval","awaiting_clarification"].includes(run.status))await monitor(created.run_id);
       else setStreaming(false);
-    }catch(e){setError(e instanceof Error?e.message:"Unknown error");}
+    }catch(e){setError(e instanceof Error?e.message:"Unknown error");setStreaming(false);}
   };
 
   const decide=async(approved:boolean)=>{
@@ -108,13 +149,13 @@ export function useChat(sessionId:string){
     });
     if(!response.ok){const data=await response.json();throw new Error(data.detail??"Approval failed");}
     if(approved){setStreaming(true);await monitor(currentRun.id);}
-    else{const run=await loadRun(currentRun.id);setCurrentRun(run);showFinal(run);}
+    else{const run=await loadRun(currentRun.id);setCurrentRun(run);showFinal(run);localStorage.removeItem(storageKey);}
   };
 
   const cancel=async()=>{
     if(!currentRun)return;
     await fetch(`${API}/runs/${currentRun.id}/cancel`,{method:"POST",headers:authHeaders()});
-    activeRun.current=null;const run=await loadRun(currentRun.id);setCurrentRun(run);showFinal(run);setStreaming(false);
+    activeRun.current=null;localStorage.removeItem(storageKey);const run=await loadRun(currentRun.id);setCurrentRun(run);showFinal(run);setStreaming(false);
   };
   const clarify=async(answers:Record<string,string>)=>{
     if(!currentRun)return;
@@ -129,7 +170,17 @@ export function useChat(sessionId:string){
       setStreaming(true);await monitor(currentRun.id);
     }
   };
-  return{messages,sendMessage,streaming,error,currentRun,decide,clarify,cancel};
+  const resume=async()=>{
+    if(!currentRun)return;
+    setError("");
+    const response=await fetch(`${API}/runs/${currentRun.id}/resume`,{
+      method:"POST",headers:{"Content-Type":"application/json",...authHeaders()},
+      body:JSON.stringify({retry_failed_step:true}),
+    });
+    if(!response.ok){const data=await response.json();throw new Error(data.detail??"Resume failed");}
+    setStreaming(true);await monitor(currentRun.id);
+  };
+  return{messages,sendMessage,streaming,error,currentRun,decide,clarify,cancel,resume};
 }
 
 export async function sendFeedback(sessionId:string,rating:number){
