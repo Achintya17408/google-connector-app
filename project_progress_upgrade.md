@@ -299,7 +299,7 @@ Guardrail: disconnect/restart tests prove the worker continues and writes are no
 - [x] Build mock Google adapters and safe replay for mutations.
 - [ ] Compare old/new planner, prompt, OKF, routing, chunking, model, and recovery policies on identical tasks.
 - [ ] Measure task/plan/tool/artifact correctness, latency, tokens, recovery, side effects, satisfaction, and retrieval.
-- [ ] Block promotion on golden-task, token, cancellation, isolation, verification, safety, or RAG regression.
+- [~] Block promotion on golden-task, token, cancellation, isolation, verification, safety, or RAG regression.
 
 ## Sprint 17 — Prompt optimization and bounded contextual bandits
 
@@ -405,3 +405,4 @@ After implementation and verification, teach through this repository:
 - 2026-07-19: Replaced generic service execution steps with explicit validated operations and per-step tool allowlists, while preserving mixed-workflow dependencies and read retry semantics. Added verified Drive trash support. Deploy workflow now labels API and worker with the exact Git commit automatically.
 - 2026-07-19: Added a deterministic no-network Google Workspace mutation simulator and versioned replay suite covering idempotency, dependency propagation, retry, partial completion, breaking-point detection, and compensation; wired it into backend CI.
 - 2026-07-19: Made the browser restore active durable runs after refresh, resume failed/partial runs from the failed step, and retain/show verified artifact links even when a later workflow step fails.
+- 2026-07-19: Strengthened canary evaluation with minimum sample, failure, cancellation, side-effect integrity, p95 latency, and token guardrails; persisted every conclusion, automatically rolled back regressions, and serialized concurrent evaluators so each canary concludes exactly once.

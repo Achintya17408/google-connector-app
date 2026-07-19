@@ -15,6 +15,44 @@ FAILURE_RECOMMENDATIONS = {
     "execution": "Add a golden replay case and constrain the planner/tool policy.",
 }
 
+CANARY_MIN_SAMPLES = 5
+CANARY_LATENCY_RATIO = 1.25
+CANARY_TOKEN_RATIO = 1.25
+
+
+def assess_canary(control: dict, candidate: dict) -> dict:
+    """Apply explicit multi-objective gates without collapsing them into one reward."""
+    if control["total"] < CANARY_MIN_SAMPLES or candidate["total"] < CANARY_MIN_SAMPLES:
+        return {"ready": False, "passed": False, "regressions": ["insufficient_samples"]}
+    control_failure = control["failed"] / control["total"]
+    candidate_failure = candidate["failed"] / candidate["total"]
+    control_cancel = control["cancelled"] / control["total"]
+    candidate_cancel = candidate["cancelled"] / candidate["total"]
+    regressions = []
+    if candidate_failure > control_failure:
+        regressions.append("failure_rate")
+    if candidate["unsafe"]:
+        regressions.append("side_effect_integrity")
+    if candidate_cancel > control_cancel + 0.05:
+        regressions.append("cancellation_rate")
+    control_latency = float(control.get("p95_ms") or 0)
+    candidate_latency = float(candidate.get("p95_ms") or 0)
+    if control_latency and candidate_latency and candidate_latency > max(
+        control_latency * CANARY_LATENCY_RATIO, control_latency + 1000
+    ):
+        regressions.append("p95_latency")
+    control_tokens = float(control.get("avg_tokens") or 0)
+    candidate_tokens = float(candidate.get("avg_tokens") or 0)
+    if control_tokens and candidate_tokens > control_tokens * CANARY_TOKEN_RATIO:
+        regressions.append("average_tokens")
+    return {
+        "ready": True, "passed": not regressions, "regressions": regressions,
+        "control_failure_rate": control_failure,
+        "candidate_failure_rate": candidate_failure,
+        "control_cancellation_rate": control_cancel,
+        "candidate_cancellation_rate": candidate_cancel,
+    }
+
 
 def _proposal_diff(category: str, recommendation: str) -> str:
     return (
@@ -100,35 +138,66 @@ async def evaluate_active_canaries(pool) -> int:
         )
     for canary in canaries:
         async with pool.acquire() as conn, conn.transaction():
+            # The API process and dedicated worker may both run this loop. Lock and
+            # re-check the lifecycle so a canary is concluded exactly once.
+            canary = await conn.fetchrow(
+                "SELECT * FROM improvement_canaries WHERE id=$1 AND status='active' FOR UPDATE",
+                canary["id"],
+            )
+            if not canary:
+                continue
             control = await conn.fetchrow(
-                """SELECT count(*) AS total,count(*) FILTER(WHERE status IN ('failed','partial')) AS failed,
-                          count(*) FILTER(WHERE side_effect_integrity<100) AS unsafe
+                """SELECT count(*) AS total,
+                          count(*) FILTER(WHERE status IN ('failed','partial')) AS failed,
+                          count(*) FILTER(WHERE status='cancelled') AS cancelled,
+                          count(*) FILTER(WHERE side_effect_integrity<100) AS unsafe,
+                          avg(coalesce(input_tokens,0)+coalesce(output_tokens,0)) AS avg_tokens,
+                          percentile_cont(0.95) WITHIN GROUP
+                            (ORDER BY extract(epoch FROM (completed_at-started_at))*1000)
+                            FILTER(WHERE completed_at IS NOT NULL AND started_at IS NOT NULL) AS p95_ms
                    FROM agent_runs WHERE deployment_version=$1 AND queued_at >= $2""",
                 canary["control_version"], canary["started_at"],
             )
             candidate = await conn.fetchrow(
-                """SELECT count(*) AS total,count(*) FILTER(WHERE status IN ('failed','partial')) AS failed,
-                          count(*) FILTER(WHERE side_effect_integrity<100) AS unsafe
+                """SELECT count(*) AS total,
+                          count(*) FILTER(WHERE status IN ('failed','partial')) AS failed,
+                          count(*) FILTER(WHERE status='cancelled') AS cancelled,
+                          count(*) FILTER(WHERE side_effect_integrity<100) AS unsafe,
+                          avg(coalesce(input_tokens,0)+coalesce(output_tokens,0)) AS avg_tokens,
+                          percentile_cont(0.95) WITHIN GROUP
+                            (ORDER BY extract(epoch FROM (completed_at-started_at))*1000)
+                            FILTER(WHERE completed_at IS NOT NULL AND started_at IS NOT NULL) AS p95_ms
                    FROM agent_runs WHERE deployment_version=$1 AND queued_at >= $2""",
                 canary["candidate_version"], canary["started_at"],
             )
-            if control["total"] < 5 or candidate["total"] < 5:
+            control_data = dict(control)
+            candidate_data = dict(candidate)
+            assessment = assess_canary(control_data, candidate_data)
+            if not assessment["ready"]:
                 continue
-            control_rate = control["failed"] / control["total"]
-            candidate_rate = candidate["failed"] / candidate["total"]
             metrics = {
-                "control": dict(control), "candidate": dict(candidate),
-                "control_failure_rate": control_rate,
-                "candidate_failure_rate": candidate_rate,
+                "control": control_data, "candidate": candidate_data,
+                **{key: value for key, value in assessment.items() if key != "ready"},
             }
-            passed = candidate_rate <= control_rate and candidate["unsafe"] == 0
+            passed = assessment["passed"]
             canary_status = "passed" if passed else "rolled_back"
             proposal_status = "awaiting_promotion" if passed else "rolled_back"
             await conn.execute(
+                """INSERT INTO improvement_evaluations
+                   (proposal_id,suite_version,control_metrics,candidate_metrics,
+                    regressions,passed)
+                   VALUES($1,'canary-guardrails-v1',$2::jsonb,$3::jsonb,$4::jsonb,$5)""",
+                canary["proposal_id"], json.dumps(control_data, default=str),
+                json.dumps(candidate_data, default=str),
+                json.dumps(assessment["regressions"]), passed,
+            )
+            await conn.execute(
                 """UPDATE improvement_canaries SET status=$1,metrics=$2::jsonb,ended_at=now(),
                      rollback_reason=$3 WHERE id=$4""",
-                canary_status, json.dumps(metrics),
-                None if passed else "Candidate breached failure or side-effect guardrail",
+                canary_status, json.dumps(metrics, default=str),
+                None if passed else "Candidate breached: " + ", ".join(
+                    assessment["regressions"]
+                ),
                 canary["id"],
             )
             await conn.execute(

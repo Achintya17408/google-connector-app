@@ -251,3 +251,74 @@ def test_worker_executes_dependency_steps_and_recovers_expired_lease():
         ]
         assert set(services) == {"gmail", "drive"}
         assert max_active == 2
+
+
+def test_canary_regression_is_evaluated_and_rolled_back():
+    from app.api.main import app
+    from app.db.connection import get_pool
+    from app.improvements.analyzer import evaluate_active_canaries
+
+    marker = str(uuid.uuid4())
+    source = f"control-{marker}"
+    candidate = f"candidate-{marker}"
+    proposal_key = f"canary-{marker}"
+
+    with TestClient(app) as client:
+        async def exercise():
+            pool = await get_pool()
+            async with pool.acquire() as conn, conn.transaction():
+                proposal_id = await conn.fetchval(
+                    """INSERT INTO improvement_proposals
+                       (proposal_key,proposal_type,title,sanitized_summary,status,
+                        source_version,candidate_version,content_hash)
+                       VALUES($1,'policy','Fixture','No user content','canary_active',$2,$3,$4)
+                       RETURNING id""",
+                    proposal_key, source, candidate, marker,
+                )
+                canary_id = await conn.fetchval(
+                    """INSERT INTO improvement_canaries
+                       (proposal_id,cohort,status,control_version,candidate_version,started_at)
+                       VALUES($1,'{}','active',$2,$3,now()-interval '2 hours') RETURNING id""",
+                    proposal_id, source, candidate,
+                )
+                for index in range(5):
+                    await conn.execute(
+                        """INSERT INTO agent_runs
+                           (session_id,user_id,request,status,idempotency_key,
+                            deployment_version,started_at,completed_at,input_tokens)
+                           VALUES($1,'fixture@example.com','fixture','completed',$2,$3,
+                                  now()-interval '2 seconds',now(),100)""",
+                        marker, f"{marker}-control-{index}", source,
+                    )
+                    await conn.execute(
+                        """INSERT INTO agent_runs
+                           (session_id,user_id,request,status,idempotency_key,
+                            deployment_version,started_at,completed_at,input_tokens,
+                            side_effect_integrity)
+                           VALUES($1,'fixture@example.com','fixture','partial',$2,$3,
+                                  now()-interval '4 seconds',now(),200,0)""",
+                        marker, f"{marker}-candidate-{index}", candidate,
+                    )
+            changed = await evaluate_active_canaries(pool)
+            async with pool.acquire() as conn:
+                canary = await conn.fetchrow(
+                    "SELECT status,rollback_reason FROM improvement_canaries WHERE id=$1",
+                    canary_id,
+                )
+                proposal = await conn.fetchval(
+                    "SELECT status FROM improvement_proposals WHERE id=$1", proposal_id,
+                )
+                evaluation = await conn.fetchrow(
+                    "SELECT passed,regressions FROM improvement_evaluations WHERE proposal_id=$1",
+                    proposal_id,
+                )
+                await conn.execute("DELETE FROM improvement_proposals WHERE id=$1", proposal_id)
+                await conn.execute("DELETE FROM agent_runs WHERE session_id=$1", marker)
+            return changed, dict(canary), proposal, dict(evaluation)
+
+        changed, canary, proposal, evaluation = client.portal.call(exercise)
+        assert changed == 1
+        assert canary["status"] == "rolled_back"
+        assert "failure_rate" in canary["rollback_reason"]
+        assert proposal == "rolled_back"
+        assert evaluation["passed"] is False
