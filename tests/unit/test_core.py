@@ -215,6 +215,12 @@ def test_multi_service_plan_is_dependency_ordered():
     assert plan.steps[-1].dependencies == [plan.steps[-2].id]
 
 
+def test_dependency_free_reads_can_execute_in_parallel():
+    plan, _ = build_plan("List recent Gmail messages and Drive files")
+    assert [step.service for step in plan.steps] == ["gmail", "drive"]
+    assert all(step.read_only and step.dependencies == [] for step in plan.steps)
+
+
 def test_write_verification_requires_stable_artifact_evidence():
     step = {"read_only": False}
     ok, _, artifacts = verify_step(step, {
