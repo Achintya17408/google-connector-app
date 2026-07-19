@@ -190,6 +190,16 @@ async def delete_account_data(body: DeleteDataRequest, request: Request):
     return {"status": "deleted", "tables": report}
 
 
+@router.get("/auth/account-data/export")
+async def export_account_data(request: Request):
+    from app.runs.retention import export_user_data
+    payload = await export_user_data(await get_pool(), request.state.user_id)
+    response = JSONResponse(payload)
+    response.headers["Content-Disposition"] = "attachment; filename=google-connector-data.json"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 async def auth_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
