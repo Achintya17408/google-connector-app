@@ -5,6 +5,9 @@ description: Distinguishes scheduled Meet invitations from independent instant M
 owner: project-admin
 version: 1
 visibility: public
+publication_status: approved
+approved_by: project-admin
+approved_at: 2026-07-19T00:00:00Z
 tags: [calendar, meet]
 timestamp: 2026-07-19T00:00:00Z
 ---

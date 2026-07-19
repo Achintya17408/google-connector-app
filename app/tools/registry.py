@@ -277,5 +277,12 @@ _TOOL_NAMES = (
     "send_chat_message", "create_meet_space", "get_meet_space",
     "list_meet_conferences", "list_meet_participants",
 )
+
+
+def registered_tool_names() -> set[str]:
+    """Return the authoritative public tool identifiers for validation/docs."""
+    return set(_TOOL_NAMES)
+
+
 for _name in _TOOL_NAMES:
     globals()[_name] = instrument_tool(globals()[_name])

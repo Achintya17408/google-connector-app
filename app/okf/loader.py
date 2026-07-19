@@ -7,9 +7,16 @@ import yaml
 
 FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
 MARKDOWN_LINK = re.compile(r"\[[^]]+\]\(([^)#]+)(?:#[^)]+)?\)")
+SECRET_PATTERN = re.compile(
+    r"(?:AIza[0-9A-Za-z_-]{30,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
+    r"sk-[A-Za-z0-9]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
+)
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+ALLOWED_VISIBILITY = {"public", "private"}
+ALLOWED_PUBLICATION = {"draft", "approved", "rejected"}
 
 
-def load_bundle(root: Path) -> tuple[list[dict], list[str]]:
+def load_bundle(root: Path, known_tools: set[str] | None = None) -> tuple[list[dict], list[str]]:
     documents = []
     errors = []
     paths = {path.relative_to(root).as_posix() for path in root.rglob("*.md")}
@@ -25,9 +32,33 @@ def load_bundle(root: Path) -> tuple[list[dict], list[str]]:
         except yaml.YAMLError as exc:
             errors.append(f"{relative}: invalid YAML: {exc}")
             continue
-        if not metadata.get("type"):
-            errors.append(f"{relative}: required field 'type' is missing")
+        for required in ("type", "title", "owner", "version", "timestamp",
+                         "visibility", "publication_status"):
+            if metadata.get(required) in (None, ""):
+                errors.append(f"{relative}: required field '{required}' is missing")
+        visibility = metadata.get("visibility", "public")
+        publication = metadata.get("publication_status", "draft")
+        if visibility not in ALLOWED_VISIBILITY:
+            errors.append(f"{relative}: invalid visibility '{visibility}'")
+        if publication not in ALLOWED_PUBLICATION:
+            errors.append(f"{relative}: invalid publication_status '{publication}'")
+        if publication == "approved" and not (
+            metadata.get("approved_by") and metadata.get("approved_at")
+        ):
+            errors.append(f"{relative}: approved documents require approved_by and approved_at")
+        tool_references = set(metadata.get("tools") or [])
+        if known_tools is not None:
+            unknown = sorted(tool_references - known_tools)
+            if unknown:
+                errors.append(f"{relative}: unknown tool references: {unknown}")
         body = match.group(2).strip()
+        if SECRET_PATTERN.search(raw):
+            errors.append(f"{relative}: secret-like value detected")
+        if visibility == "public":
+            public_emails = [value for value in EMAIL_PATTERN.findall(raw)
+                             if not value.lower().endswith("@example.com")]
+            if public_emails:
+                errors.append(f"{relative}: public document contains email-like PII")
         for target in MARKDOWN_LINK.findall(body):
             if target.startswith(("http://", "https://", "/")):
                 continue
@@ -49,7 +80,8 @@ def load_bundle(root: Path) -> tuple[list[dict], list[str]]:
             "tags": metadata.get("tags") or [],
             "owner": metadata.get("owner"),
             "version": str(metadata.get("version", "1")),
-            "visibility": metadata.get("visibility", "public"),
+            "visibility": visibility,
+            "trusted": publication == "approved",
             "content": body,
             "content_hash": content_hash,
             "metadata": metadata,
@@ -85,7 +117,8 @@ def section_chunks(document: dict) -> list[dict]:
 
 async def sync_bundle(pool, root: Path | None = None):
     root = root or Path(__file__).resolve().parents[2] / "knowledge"
-    documents, errors = load_bundle(root)
+    from app.tools.registry import registered_tool_names
+    documents, errors = load_bundle(root, registered_tool_names())
     if errors:
         raise ValueError("Invalid OKF bundle:\n" + "\n".join(errors))
     async with pool.acquire() as conn:
@@ -95,18 +128,22 @@ async def sync_bundle(pool, root: Path | None = None):
                     """INSERT INTO okf_documents
                        (id,visibility,concept_type,title,description,resource,tags,
                         owner,version,content,content_hash,metadata,trusted,published_at)
-                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,TRUE,now())
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,
+                              CASE WHEN $13 THEN now() ELSE NULL END)
                        ON CONFLICT(id) DO UPDATE SET visibility=excluded.visibility,
                         concept_type=excluded.concept_type,title=excluded.title,
                         description=excluded.description,resource=excluded.resource,
                         tags=excluded.tags,owner=excluded.owner,version=excluded.version,
                         content=excluded.content,content_hash=excluded.content_hash,
-                        metadata=excluded.metadata,updated_at=now()""",
+                        metadata=excluded.metadata,trusted=excluded.trusted,
+                        published_at=CASE WHEN excluded.trusted
+                          THEN COALESCE(okf_documents.published_at,now()) ELSE NULL END,
+                        updated_at=now()""",
                     document["id"], document["visibility"], document["concept_type"],
                     document["title"], document["description"], document["resource"],
                     document["tags"], document["owner"], document["version"],
                     document["content"], document["content_hash"],
-                    json.dumps(document["metadata"], default=str),
+                    json.dumps(document["metadata"], default=str), document["trusted"],
                 )
                 await conn.execute("DELETE FROM okf_chunks WHERE document_id=$1", document["id"])
                 for chunk in section_chunks(document):
