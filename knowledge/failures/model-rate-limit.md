@@ -5,6 +5,9 @@ description: Handles exhausted model quota without unsafe quality degradation.
 owner: project-admin
 version: 1
 visibility: public
+publication_status: approved
+approved_by: project-admin
+approved_at: 2026-07-19T00:00:00Z
 tags: [model, quota, recovery]
 timestamp: 2026-07-19T00:00:00Z
 ---

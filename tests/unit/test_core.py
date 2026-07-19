@@ -20,11 +20,13 @@ from app.config.settings import get_settings
 from app.config.feature_flags import cohort_selected
 from app.runs.planner import build_plan, classify_request
 from app.okf.loader import load_bundle
+from app.okf.generator import build_catalog_draft
 from pathlib import Path
 from app.rag.chunking import chunk_gmail, chunk_meet_transcript, chunk_pdf, chunk_sheet
 from app.runs.worker import verify_step
 from app.tools.base import tool_run_id
 from app.tools.registry import _request_id
+from app.tools.registry import registered_tool_names
 from app.evaluation.replay import replay_case
 from app.improvements.analyzer import assess_canary
 
@@ -129,6 +131,35 @@ def test_service_subgraph_module_exports_callable(service):
     node = getattr(module, f"{service}_subgraph")
     assert callable(node)
     assert node.__name__ == f"{service}_agent"
+
+
+def test_okf_catalog_is_human_governed_and_generated_draft_is_untrusted(tmp_path):
+    draft = build_catalog_draft()
+    assert "publication_status: draft" in draft
+    assert "send_gmail" in draft
+    candidate = tmp_path / "candidate.md"
+    candidate.write_text(draft, encoding="utf-8")
+    documents, errors = load_bundle(tmp_path, registered_tool_names())
+    assert not errors
+    assert documents[0]["trusted"] is False
+
+
+def test_okf_validation_rejects_unknown_tool_reference(tmp_path):
+    candidate = tmp_path / "bad.md"
+    candidate.write_text("""---
+type: capability
+title: Bad
+owner: test
+version: 1
+timestamp: 2026-07-19T00:00:00Z
+visibility: public
+publication_status: draft
+tools: [invented_google_tool]
+---
+No authority.
+""", encoding="utf-8")
+    _, errors = load_bundle(tmp_path, {"send_gmail"})
+    assert any("unknown tool" in error for error in errors)
 
 
 def test_graph_results_distinguish_retrieval_from_tool_execution():
