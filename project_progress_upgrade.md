@@ -326,7 +326,7 @@ Guardrail: disconnect/restart tests prove the worker continues and writes are no
 
 - [x] Create `dbeaver_analyst`-style Neon role and curated reporting schema/views with no secret table access.
 - [x] Configure production Neon, local Homebrew, and local Docker connections with approved names/colors/folders/read-only settings.
-- [ ] Provide ER diagram and views for run status, timeline, failure, models/tokens, retrieval, tools, artifacts, prompts, session history, security, improvements, and canaries.
+- [x] Provide ER diagram and views for run status, timeline, failure, models/tokens, retrieval, tools, artifacts, prompts, session history, security, improvements, and canaries.
 - [ ] Store credentials only in DBeaver secure storage; stop only for unavoidable GUI/master-password interaction.
 
 ## Sprint 21 — Deployment, canary, and rollback
@@ -406,3 +406,4 @@ After implementation and verification, teach through this repository:
 - 2026-07-19: Added a deterministic no-network Google Workspace mutation simulator and versioned replay suite covering idempotency, dependency propagation, retry, partial completion, breaking-point detection, and compensation; wired it into backend CI.
 - 2026-07-19: Made the browser restore active durable runs after refresh, resume failed/partial runs from the failed step, and retain/show verified artifact links even when a later workflow step fails.
 - 2026-07-19: Strengthened canary evaluation with minimum sample, failure, cancellation, side-effect integrity, p95 latency, and token guardrails; persisted every conclusion, automatically rolled back regressions, and serialized concurrent evaluators so each canary concludes exactly once.
+- 2026-07-19: Added migration 006 with complete read-only DBeaver reporting views/ER map and grants, plus a tenant-scoped account export that excludes OAuth ciphertext and vector embeddings; corrected Docker reporting access to explicit IPv4 to avoid Homebrew PostgreSQL collisions.

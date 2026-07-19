@@ -20,3 +20,8 @@ Center. The lifecycle is:
 
 A guardrail breach produces `rolled_back`. Any material candidate change changes the
 hash and invalidates the earlier approval.
+
+Users can download their tenant-scoped runs, events, verified artifacts,
+conversations, feedback, RAG text/lineage, and consented trajectories from
+`GET /auth/account-data/export`. OAuth ciphertext and vector embeddings are always
+excluded. `POST /auth/account-data/delete` remains separately confirmation-gated.

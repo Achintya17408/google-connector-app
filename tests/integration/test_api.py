@@ -173,6 +173,51 @@ def test_run_idempotency_and_cross_user_isolation():
         ).json() == {"runs": []}
 
 
+def test_account_export_is_tenant_scoped_and_excludes_oauth_secrets():
+    from app.api.main import app
+    from app.db.connection import get_pool
+
+    first_email = f"export-first-{uuid.uuid4()}@example.com"
+    second_email = f"export-second-{uuid.uuid4()}@example.com"
+    with TestClient(app) as client:
+        first_token = client.post("/auth/token", json={"email": first_email}).json()[
+            "access_token"
+        ]
+
+        async def seed():
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.executemany(
+                    """INSERT INTO conversation_history
+                       (session_id,user_id,role,content) VALUES($1,$2,'user',$3)""",
+                    [("export-first", first_email, "first-private"),
+                     ("export-second", second_email, "second-private")],
+                )
+
+        async def cleanup():
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM conversation_history WHERE user_id=ANY($1::text[])",
+                    [first_email, second_email],
+                )
+
+        client.portal.call(seed)
+        response = client.get(
+            "/auth/account-data/export",
+            headers={"Authorization": f"Bearer {first_token}"},
+        )
+        client.portal.call(cleanup)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["user_id"] == first_email
+        assert payload["oauth_credentials_excluded"] is True
+        serialized = json.dumps(payload)
+        assert "first-private" in serialized
+        assert "second-private" not in serialized
+        assert "encrypted_credentials" not in serialized
+
+
 def test_per_user_active_run_limit_is_enforced():
     from app.api.main import app
 
