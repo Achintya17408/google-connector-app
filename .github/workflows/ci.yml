@@ -6,7 +6,7 @@ on:
     branches: [main]
   workflow_dispatch:
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -32,3 +32,50 @@ jobs:
           RUN_INTEGRATION_TESTS: '1'
           ALLOW_DEV_AUTH: 'true'
       - run: pip install flake8 && flake8 app/ --max-line-length=100
+      - name: Run deterministic planner regression set
+        run: python scripts/run_golden_evals.py
+      - name: Verify migration downgrade and forward repair
+        run: |
+          alembic downgrade 002
+          alembic upgrade head
+          test "$(alembic current | tail -1)" = "005 (head)"
+      - name: Validate Docker Compose model
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: Verify sensitive local files are not tracked or present in history
+        run: |
+          ! git ls-files | grep -E '(^|/)(\.env|credentials\.json|google-oauth-web\.json|token\.pkl)$'
+          ! git log --all --name-only --pretty=format: | grep -E '(^|/)(\.env|credentials\.json|google-oauth-web\.json|token\.pkl)$'
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  flutter:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - run: flutter build apk --debug
