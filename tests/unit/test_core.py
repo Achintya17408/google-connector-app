@@ -26,6 +26,7 @@ from app.runs.worker import verify_step
 from app.tools.base import tool_run_id
 from app.tools.registry import _request_id
 from app.evaluation.replay import replay_case
+from app.improvements.analyzer import assess_canary
 
 def test_context_packer_orders_by_score():
     text = pack_context([
@@ -96,6 +97,27 @@ def test_mutation_replay_records_breaking_point_and_compensation():
     assert result.first_breaking_point == "chat"
     assert result.steps[0].compensated is True
     assert result.functional_completion == 100
+
+
+def test_canary_guardrails_require_samples_and_preserve_objectives():
+    baseline = {
+        "total": 10, "failed": 1, "cancelled": 0, "unsafe": 0,
+        "p95_ms": 1000, "avg_tokens": 1000,
+    }
+    assert assess_canary({**baseline, "total": 4}, baseline)["ready"] is False
+    passed = assess_canary(baseline, {
+        **baseline, "failed": 0, "p95_ms": 1100, "avg_tokens": 1100,
+    })
+    assert passed["passed"] is True
+    failed = assess_canary(baseline, {
+        **baseline, "failed": 2, "unsafe": 1, "p95_ms": 2500,
+        "avg_tokens": 1500, "cancelled": 1,
+    })
+    assert failed["passed"] is False
+    assert set(failed["regressions"]) == {
+        "failure_rate", "side_effect_integrity", "cancellation_rate",
+        "p95_latency", "average_tokens",
+    }
 
 
 @pytest.mark.parametrize(
