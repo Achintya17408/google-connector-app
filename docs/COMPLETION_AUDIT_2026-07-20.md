@@ -75,3 +75,30 @@ services, 17 evaluated Grafana Cloud rules, and 34 installed dashboard panels.
   publisher token and an explicit publication confirmation.
 
 These are not replaced with fabricated synthetic production claims.
+
+## Teaching deliverable
+
+The post-upgrade teaching phase is complete and grounded in the repository rather
+than generic examples. It covers execution DAGs and topological order, durable state
+machines, PostgreSQL queues and leases, idempotency and effectively-once effects,
+source-aware chunk trees, sliding windows, HNSW and reciprocal-rank fusion, greedy
+versus dynamic-programming context packing, memoization and incremental embeddings,
+bounded backtracking and compensation, admission/rate limiting, consistent hashing,
+contextual bandits, MDP trajectories, offline-RL safety boundaries, and OKF v0.1 plus
+the project's stricter publication profile. The durable course is
+`docs/TEACHING_AGENTIC_DSA_OKF.md`; the interactive walkthrough was delivered after
+the working engineering upgrade, as required.
+
+## Final requirement disposition
+
+- Approved sprint/epic/story plan and detailed implementation ledger: complete.
+- Source-aware RAG/chunking and evaluation infrastructure: complete; empirical winners
+  remain correctly evidence-gated.
+- Production, local Homebrew, and local Docker DBeaver definitions: installed. The
+  production connection uses `dbeaver_analyst`, SSL, a read-only server role, and
+  `save-password: false`. Only DBeaver's local secure-vault password entry remains.
+- Engineering implementation, deployment, observability, documentation, tests, and
+  teaching: complete and verified.
+- Longitudinal pilot expansion, policy/RAG winners, and real external proposal delivery:
+  cannot be completed without real users, elapsed labelled evidence, or the expressly
+  required human publication decision.
