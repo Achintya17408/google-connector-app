@@ -307,3 +307,45 @@ may index it; APIs provide current facts and actions; protocols expose tools.
    algorithmic choices to production outcomes.
 10. After enough reviewed examples exist, evaluate a bounded bandit offline;
     never enable live exploratory RL for Google writes.
+
+## 19. Classification and guarded dispatch
+
+Sprint 27 adds a deterministic intent gateway before the action planner. The output
+set is finite: Workspace action, Workspace guidance, product information, bounded
+scope chat, ambiguous, or out of scope. This is a classification-and-dispatch
+algorithm, not an invitation to global conversation.
+
+A useful implementation model is a decision tree whose early branches protect
+security boundaries:
+
+```text
+product identity/capability pattern? -> trusted registry answer
+bounded greeting/clarification?       -> local scope answer
+Workspace entity + guidance wording? -> approved registry/OKF guidance
+Workspace entity + action verb?       -> typed action planner
+Workspace entity only?               -> precise clarification
+otherwise                            -> polite scope redirect
+```
+
+The fast path is linear in request length for the bounded pattern set. The important
+invariant is not the asymptotic complexity; it is that a conversational classification
+cannot silently acquire Google tools, tenant RAG, or model authority.
+
+## 20. Failure fingerprints, clustering, and streaming evidence
+
+A broad label such as `execution` is too lossy for learning. Sprint 27 hashes a
+normalized tuple:
+
+```text
+(stage, category, component, service, operation, normalized_error_template)
+```
+
+This is analogous to choosing the key for a hash map. Too broad a key merges unrelated
+bugs; raw error text creates excessive cardinality and privacy risk. Normalization
+removes direct identifiers and variable numbers before hashing, while every occurrence
+remains a separate durable incident.
+
+The portal is a human-labelled stream processor: each incident receives two bounded
+strategies; a reviewer selects A/B, acknowledges, or ignores it; selected incidents
+join a cluster proposal; rejected or expired proposals do not suppress later evidence.
+Those labels become evaluation data, but never self-approve a candidate or live policy.
