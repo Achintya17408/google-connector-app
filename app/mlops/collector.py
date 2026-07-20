@@ -7,6 +7,7 @@ from app.mlops.metrics import (
     improvement_queue,
     improvement_notifications,
     rag_quality,
+    rag_quality_samples,
     run_queue_depth,
     stale_runs,
 )
@@ -68,9 +69,15 @@ async def collect_operational_metrics(pool):
         quality = await conn.fetchrow(
             """SELECT avg(faithfulness) AS faithfulness,
                       avg(answer_relevancy) AS answer_relevancy,
-                      avg(context_recall) AS context_recall
-               FROM prompt_metrics WHERE recorded_at >= now()-interval '7 days'"""
+                      avg(context_recall) AS context_recall,
+                      count(*) FILTER (WHERE faithfulness IS NOT NULL
+                                       OR answer_relevancy IS NOT NULL
+                                       OR context_recall IS NOT NULL) AS samples
+               FROM prompt_metrics
+               WHERE recorded_at >= now()-interval '7 days'
+                 AND metric_source='rag_evaluation'"""
         )
+        rag_quality_samples.set(int(quality["samples"] or 0))
         for metric in ("faithfulness", "answer_relevancy", "context_recall"):
             if quality[metric] is not None:
                 rag_quality.labels(metric).set(float(quality[metric]))

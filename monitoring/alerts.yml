@@ -72,10 +72,15 @@ groups:
         labels: {severity: warning}
         annotations: {summary: "Google OAuth callback failures increased"}
       - alert: RAGQualityRegression
-        expr: min(agent_rag_quality{metric=~"faithfulness|context_recall"}) < 0.70
+        expr: (min(agent_rag_quality{metric=~"faithfulness|context_recall"}) < 0.70) and on() (agent_rag_quality_samples >= 10)
         for: 30m
         labels: {severity: warning}
         annotations: {summary: "Offline RAG quality fell below the guarded baseline"}
+      - alert: RAGEvaluationSampleDeficit
+        expr: agent_rag_quality_samples < 10
+        for: 24h
+        labels: {severity: info}
+        annotations: {summary: "Fewer than ten valid RAG evaluation samples are available"}
       - alert: DeploymentVersionMissing
         expr: absent(agent_build_info)
         for: 10m

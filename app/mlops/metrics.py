@@ -65,4 +65,8 @@ oauth_outcomes = Counter(
 rag_quality = Gauge(
     "agent_rag_quality", "Latest rolling offline RAG quality score", ["metric"]
 )
+rag_quality_samples = Gauge(
+    "agent_rag_quality_samples",
+    "Number of valid RAG evaluation samples in the rolling quality window",
+)
 build_info = Info("agent_build", "Immutable deployed application version")

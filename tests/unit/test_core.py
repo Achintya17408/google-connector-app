@@ -5,7 +5,7 @@ from langchain_core.tools import tool
 
 from app.rag.context_packer import pack_context, sanitize_untrusted_content
 from app.rag.evaluation import retrieval_metrics
-from app.mlops.ragas_eval import _context_text
+from app.mlops.ragas_eval import _context_text, _retrieved_contexts
 from scripts.run_ragas_eval import _score_payload
 from app.evaluation.metrics import compare_policy_metrics, evaluate_plan
 from app.agents.router import route_model_node
@@ -35,7 +35,7 @@ from app.evaluation.replay import replay_case
 from app.improvements.analyzer import assess_canary
 from app.improvements.publisher import proposal_markdown
 from app.api.middleware.metrics import _correlation_id, _route_template
-from app.mlops.tracing import _headers as otlp_headers, _trace_endpoint
+from app.mlops.tracing import _headers as otlp_headers, _logs_endpoint, _trace_endpoint
 from types import SimpleNamespace
 
 def test_context_packer_orders_by_score():
@@ -49,6 +49,11 @@ def test_context_packer_orders_by_score():
 def test_ragas_context_uses_retrieved_content_not_metadata_repr():
     assert _context_text({"content": "usable evidence", "secret": "ignored"}) == "usable evidence"
     assert _context_text({"text": "fallback evidence"}) == "fallback evidence"
+    assert _retrieved_contexts(None) == []
+    assert _retrieved_contexts('[]') == []
+    assert _retrieved_contexts('[{"content":"evidence"}]') == [
+        {"content": "evidence"},
+    ]
 
 
 def test_offline_evaluation_scores_are_json_and_bounded():
@@ -120,6 +125,12 @@ def test_otlp_configuration_requires_safe_endpoints_and_well_formed_headers():
         "https://tempo.example.com/v1/traces"
     )
     assert _trace_endpoint("http://localhost:4318") == "http://localhost:4318/v1/traces"
+    assert _logs_endpoint("https://otlp.example.com/otlp") == (
+        "https://otlp.example.com/otlp/v1/logs"
+    )
+    assert _logs_endpoint("https://otlp.example.com/otlp/v1/traces") == (
+        "https://otlp.example.com/otlp/v1/logs"
+    )
     with pytest.raises(ValueError, match="HTTPS"):
         _trace_endpoint("http://public.example.com:4318")
     assert otlp_headers("Authorization=Basic redacted,X-Scope=tenant") == {

@@ -85,7 +85,7 @@ async def record_metric(pool=None, **values):
         "assignment_id", "prompt_id", "session_id", "llm_latency_ms",
         "total_latency_ms", "input_tokens", "output_tokens", "faithfulness",
         "answer_relevancy", "context_recall", "user_rating", "task_completed",
-        "error_occurred", "error_type",
+        "error_occurred", "error_type", "metric_source",
     }
     columns = [key for key in values if key in allowed]
     if not columns:

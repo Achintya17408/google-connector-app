@@ -7,6 +7,13 @@ def _context_text(item) -> str:
     return str(item)
 
 
+def _retrieved_contexts(value) -> list:
+    contexts = value or []
+    if isinstance(contexts, str):
+        contexts = json.loads(contexts)
+    return contexts if isinstance(contexts, list) else []
+
+
 async def load_evaluation_examples(pool, limit=20):
     """Use corrected negatives when available; never call a bad answer ground truth."""
     async with pool.acquire() as conn:
@@ -21,9 +28,12 @@ async def load_evaluation_examples(pool, limit=20):
         )
     examples = []
     for row in rows:
-        contexts = row["retrieved_docs"] or []
-        if isinstance(contexts, str):
-            contexts = json.loads(contexts)
+        contexts = _retrieved_contexts(row["retrieved_docs"])
+        # RAG quality is meaningful only when retrieval actually supplied
+        # evidence. Live/API-only workflows that correctly skip RAG belong in
+        # workflow evaluation, not in context recall or faithfulness averages.
+        if not contexts:
+            continue
         examples.append({
             "feedback_id": str(row["id"]),
             "session_id": row["session_id"],

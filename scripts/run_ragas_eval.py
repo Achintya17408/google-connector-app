@@ -76,6 +76,7 @@ async def main():
                 faithfulness=row["faithfulness"],
                 answer_relevancy=row["answer_relevancy"],
                 context_recall=row["context_recall"],
+                metric_source="rag_evaluation",
             )
         print(json.dumps({"examples": len(scored), "scores": scored}))
     finally:

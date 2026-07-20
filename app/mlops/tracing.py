@@ -1,11 +1,16 @@
+import logging
 import os
 from urllib.parse import unquote, urlparse
 
 from opentelemetry import trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
@@ -38,6 +43,13 @@ def _trace_endpoint(value: str) -> str:
     return endpoint if endpoint.endswith("/v1/traces") else f"{endpoint}/v1/traces"
 
 
+def _logs_endpoint(value: str) -> str:
+    endpoint = value.strip().rstrip("/")
+    if endpoint.endswith("/v1/traces"):
+        endpoint = endpoint.removesuffix("/v1/traces")
+    return f"{endpoint}/v1/logs" if endpoint else ""
+
+
 def configure_tracing(app=None) -> bool:
     """Instrument safe metadata only; never attach request bodies or query strings."""
     global _configured
@@ -49,18 +61,36 @@ def configure_tracing(app=None) -> bool:
         or os.getenv("RAILWAY_SERVICE_NAME", "").strip()
         or "google-connector-app"
     )
-    provider = TracerProvider(resource=Resource.create({
+    resource = Resource.create({
         "service.name": service_name,
         "service.version": settings.deployment_version,
         "deployment.environment": "production"
         if settings.deployment_version != "local" else "local",
-    }))
+    })
+    provider = TracerProvider(resource=resource)
     endpoint = _trace_endpoint(settings.otel_exporter_otlp_endpoint)
     if endpoint:
+        headers = _headers(settings.otel_exporter_otlp_headers)
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
             endpoint=endpoint,
-            headers=_headers(settings.otel_exporter_otlp_headers),
+            headers=headers,
         )))
+        logger_provider = LoggerProvider(resource=resource)
+        logger_provider.add_log_record_processor(BatchLogRecordProcessor(
+            OTLPLogExporter(
+                endpoint=_logs_endpoint(endpoint),
+                headers=headers,
+            )
+        ))
+        set_logger_provider(logger_provider)
+        request_logger = logging.getLogger("google_connector.requests")
+        if not any(
+            getattr(handler, "_google_connector_otlp", False)
+            for handler in request_logger.handlers
+        ):
+            handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+            handler._google_connector_otlp = True
+            request_logger.addHandler(handler)
     trace.set_tracer_provider(provider)
     AsyncPGInstrumentor().instrument(tracer_provider=provider)
     HTTPXClientInstrumentor().instrument(tracer_provider=provider)
