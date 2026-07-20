@@ -279,6 +279,21 @@ No authority.
     assert any("unknown tool" in error for error in errors)
 
 
+def test_okf_v01_minimal_concept_and_broken_links_are_consumable(tmp_path):
+    (tmp_path / "index.md").write_text(
+        '---\nokf_version: "0.1"\n---\n# Index\n- [Future](future.md)\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "minimal.md").write_text(
+        "---\ntype: Reference\n---\nSee [not written yet](missing.md).\n",
+        encoding="utf-8",
+    )
+    documents, errors = load_bundle(tmp_path)
+    assert not errors
+    assert [document["id"] for document in documents] == ["minimal.md"]
+    assert documents[0]["trusted"] is False
+
+
 def test_graph_results_distinguish_retrieval_from_tool_execution():
     documents = [{"source": "gmail", "content": "Budget", "score": 0.9}]
     assert classify_graph_results({
@@ -606,11 +621,12 @@ def test_live_operations_skip_rag_and_semantic_questions_use_it():
 
 
 def test_okf_bundle_is_valid():
-    documents, errors = load_bundle(Path("knowledge"))
+    documents, errors = load_bundle(Path("knowledge"), enforce_governance=True)
     assert not errors
     assert {item["concept_type"] for item in documents} >= {
-        "index", "policy", "workflow", "capability", "runbook",
+        "policy", "workflow", "capability", "runbook",
     }
+    assert all(item["id"] != "index.md" for item in documents)
 
 
 def test_source_aware_chunking_removes_quoted_mail_and_preserves_sheet_headers():

@@ -28,6 +28,17 @@ external credentials or longitudinal production evidence.
 - A mounted protected OKF directory is validated and namespaced under `private/`.
   Normal runtime retrieval is public-only; protected retrieval requires an
   explicit authorized code path that no current user request enables.
+- Grafana Cloud receives Railway API/worker metrics through Alloy, traces through
+  Tempo, and bounded-cardinality sanitized request logs through Loki. Both the
+  aggregate and restricted Neon session dashboards are installed; all 17 alert
+  rules evaluate successfully and route to the Grafana administrator.
+- Migration 008 separates runtime prompt telemetry from valid RAG-evaluation
+  samples. RAG regression is evaluated only after ten evidence-bearing examples,
+  while a separate alert reports insufficient evaluation data.
+- The OKF consumer follows the official v0.1 reserved-file rules: `index.md` and
+  `log.md` are not concepts, the root index declares `okf_version: "0.1"`, minimal
+  concepts require only `type`, and broken links remain consumable. Production
+  synchronization separately enforces this project's human-approval profile.
 
 ## Direct evaluation evidence
 
@@ -45,12 +56,11 @@ The authoritative commands are the repository CI jobs, `pytest tests/`,
 `scripts/run_golden_evals.py`, `scripts/run_workflow_replays.py`, and
 `scripts/run_policy_evals.py`.
 
-The final local evidence for this checkpoint is 69/69 exact-image backend tests,
-54/54 host unit tests, 22/22 planner golden cases at 1.0 mean correctness, 4/4
-no-network mutation replays, migration 007 -> 002 -> 007, zero Python or npm
-audit findings, clean Python lint/Bandit, clean Next.js lint/build, clean Flutter
-analyze/test/debug APK, two healthy Prometheus targets, 16 valid alert rules, and
-34 panels across the aggregate and session Grafana dashboards.
+The final verified evidence is recorded in the progress log and repository CI.
+It includes exact-image and host backend suites, 22 planner golden cases, four
+no-network mutation replays, migration downgrade/forward repair through revision
+008, Python/web/mobile security and build gates, healthy local and production
+services, 17 evaluated Grafana Cloud rules, and 34 installed dashboard panels.
 
 ## Correctly unresolved conclusions
 
@@ -59,7 +69,6 @@ analyze/test/debug APK, two healthy Prometheus targets, 16 valid alert rules, an
 - Prompt/model/routing/OKF policy winners and offline RL require at least the
   approved verified sample minimum and stable train/validation/test splits.
 - Pilot expansion requires real consenting users and elapsed production evidence.
-- Grafana Cloud/Alloy collection requires the account's remote-write credentials.
 - DBeaver secure-storage completion requires the user's local GUI/master-password
   action.
 - External proposal email/GitHub delivery requires a chosen recipient or scoped

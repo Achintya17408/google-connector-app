@@ -1,15 +1,5 @@
 ---
-type: index
-title: Google Connector Operational Knowledge
-description: Trusted operational knowledge for the Google Workspace agent.
-owner: project-admin
-version: 1
-visibility: public
-publication_status: approved
-approved_by: project-admin
-approved_at: 2026-07-19T00:00:00Z
-tags: [google-workspace, agent, operations]
-timestamp: 2026-07-19T00:00:00Z
+okf_version: "0.1"
 ---
 # Operational knowledge
 
