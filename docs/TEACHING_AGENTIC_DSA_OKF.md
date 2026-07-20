@@ -207,6 +207,20 @@ artifacts. Otherwise recovery could send the same email twice. Queue performance
 depends on partial indexes over runnable states; fairness additionally requires
 per-user limits and an age/risk/deadline policy.
 
+The lease-recovery policy deliberately distinguishes computation from side effects:
+
+- an interrupted read is returned to `pending` only while its bounded retry budget
+  remains;
+- an exhausted read becomes a normal recoverable worker failure;
+- an interrupted write is never retried blindly, because the Google API may have
+  committed immediately before the worker died;
+- that ambiguous write becomes `worker_reconciliation`, records a portal incident,
+  sets side-effect integrity to unknown/unsafe, and blocks ordinary resume until the
+  external resource has been reconciled.
+
+This is a practical distributed-systems invariant: absence of a local acknowledgement
+does not prove absence of a remote side effect.
+
 ## 14. Hash maps, sets, and effectively-once effects
 
 `app/runs/repository.py` stores request idempotency keys. The planner binds an

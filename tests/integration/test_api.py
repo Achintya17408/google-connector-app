@@ -663,6 +663,12 @@ def test_worker_executes_dependency_steps_and_recovers_expired_lease():
                        queued_at=now()-interval '100 years' WHERE id=$1""",
                     run["id"],
                 )
+                await conn.execute(
+                    """UPDATE agent_run_steps SET status='running',attempt_count=1,
+                       started_at=now()-interval '2 minutes'
+                       WHERE run_id=$1 AND sequence_no=1""",
+                    run["id"],
+                )
             claimed = await claim_run(pool, "replacement-worker")
             graph = FakeGraph()
             fake_app = SimpleNamespace(state=SimpleNamespace(agent_graph=graph))
@@ -677,6 +683,101 @@ def test_worker_executes_dependency_steps_and_recovers_expired_lease():
         ]
         assert set(services) == {"gmail", "drive"}
         assert max_active == 2
+
+
+def test_expired_write_lease_requires_reconciliation_and_blocks_resume():
+    from app.api.main import app
+    from app.db.connection import get_pool
+    from app.runs.repository import create_run, get_run
+    from app.runs.worker import claim_run
+
+    user_id = "stale-write@example.com"
+    with TestClient(app) as client:
+        async def exercise():
+            pool = await get_pool()
+            marker = f"stale-write-{uuid.uuid4()}"
+            run, _ = await create_run(
+                pool, user_id,
+                "Send an email to fixture@example.com with subject Lease and body Test "
+                "without asking",
+                marker, marker,
+            )
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE agent_runs SET status='running',lease_owner='dead-worker',
+                       lease_expires_at=now()-interval '1 minute',
+                       queued_at=now()-interval '100 years' WHERE id=$1""",
+                    run["id"],
+                )
+                await conn.execute(
+                    """UPDATE agent_run_steps SET status='running',attempt_count=1,
+                       started_at=now()-interval '2 minutes' WHERE run_id=$1""",
+                    run["id"],
+                )
+            recovered = await claim_run(pool, "replacement-worker")
+            stored = await get_run(pool, run["id"], user_id)
+            incident_count = await pool.fetchval(
+                "SELECT count(*) FROM failure_incidents WHERE run_id=$1", run["id"]
+            )
+            return recovered, stored, incident_count
+
+        recovered, stored, incident_count = client.portal.call(exercise)
+        assert recovered["_terminal_recovery"] is True
+        assert stored["status"] == "failed"
+        assert stored["current_phase"] == "reconciliation"
+        assert stored["error_category"] == "worker_reconciliation"
+        assert stored["side_effect_integrity"] == 0
+        assert stored["steps"][0]["status"] == "failed"
+        assert incident_count == 1
+
+        token = client.post("/auth/token", json={"email": user_id}).json()["access_token"]
+        response = client.post(
+            f"/runs/{stored['id']}/resume",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"retry_failed_step": True},
+        )
+        assert response.status_code == 409
+        assert "may already have completed" in response.json()["detail"]
+
+
+def test_expired_read_lease_with_exhausted_budget_fails_without_side_effect_risk():
+    from app.api.main import app
+    from app.db.connection import get_pool
+    from app.runs.repository import create_run, get_run
+    from app.runs.worker import claim_run
+
+    user_id = "stale-read@example.com"
+    with TestClient(app) as client:
+        async def exercise():
+            pool = await get_pool()
+            marker = f"stale-read-{uuid.uuid4()}"
+            run, _ = await create_run(
+                pool, user_id, "List recent Gmail messages", marker, marker,
+            )
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE agent_runs SET status='running',lease_owner='dead-worker',
+                       lease_expires_at=now()-interval '1 minute',
+                       queued_at=now()-interval '100 years' WHERE id=$1""",
+                    run["id"],
+                )
+                await conn.execute(
+                    """UPDATE agent_run_steps SET status='running',
+                       attempt_count=max_attempts,started_at=now()-interval '2 minutes'
+                       WHERE run_id=$1""",
+                    run["id"],
+                )
+            recovered = await claim_run(pool, "replacement-worker")
+            stored = await get_run(pool, run["id"], user_id)
+            return recovered, stored
+
+        recovered, stored = client.portal.call(exercise)
+        assert recovered["_terminal_recovery"] is True
+        assert stored["status"] == "failed"
+        assert stored["current_phase"] == "failed"
+        assert stored["error_category"] == "worker"
+        assert stored["side_effect_integrity"] == 100
+        assert stored["incident_summary"]["recoverable"] is True
 
 
 def test_durable_informational_run_completes_without_graph_or_model_calls():

@@ -36,8 +36,9 @@ def classify_error(exc: Exception) -> str:
 
 async def claim_run(pool, owner: str):
     lease = get_settings().worker_lease_seconds
-    async with pool.acquire() as conn:
-        async with conn.transaction():
+    while True:
+        terminal_recovery = None
+        async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """SELECT * FROM agent_runs
                    WHERE (status='queued' OR
@@ -48,14 +49,150 @@ async def claim_run(pool, owner: str):
             )
             if not row:
                 return None
-            updated = await conn.fetchrow(
-                """UPDATE agent_runs SET status='running',current_phase='execution',
-                   started_at=COALESCE(started_at,now()),heartbeat_at=now(),
-                   lease_owner=$1,lease_expires_at=now()+($2 * interval '1 second')
-                   WHERE id=$3 RETURNING *""",
-                owner, lease, row["id"],
-            )
+            if row["status"] == "running":
+                interrupted = await conn.fetch(
+                    """SELECT * FROM agent_run_steps
+                       WHERE run_id=$1 AND status='running' ORDER BY sequence_no
+                       FOR UPDATE""",
+                    row["id"],
+                )
+                retryable = interrupted and all(
+                    step["read_only"] and step["attempt_count"] < step["max_attempts"]
+                    for step in interrupted
+                )
+                if retryable:
+                    await conn.execute(
+                        """UPDATE agent_run_steps SET status='pending',started_at=NULL,
+                           completed_at=NULL,error_category='worker',
+                           error_message='Worker lease expired; safe read scheduled again'
+                           WHERE run_id=$1 AND status='running'""",
+                        row["id"],
+                    )
+                    await conn.execute(
+                        """INSERT INTO agent_run_events
+                           (run_id,user_id,event_type,phase,message,payload)
+                           VALUES($1,$2,'lease_recovered','recovery',
+                                  'Expired worker lease recovered; interrupted reads requeued',
+                                  $3::jsonb)""",
+                        row["id"], row["user_id"],
+                        json.dumps({"step_count": len(interrupted), "write_retried": False}),
+                    )
+                elif interrupted:
+                    reconciliation_required = any(
+                        not step["read_only"] for step in interrupted
+                    )
+                    category = (
+                        "worker_reconciliation" if reconciliation_required else "worker"
+                    )
+                    error = (
+                        "Worker lease expired while an external write may have completed; "
+                        "automatic retry is blocked pending reconciliation"
+                        if reconciliation_required else
+                        "Worker lease expired and the safe read retry budget was exhausted"
+                    )
+                    await conn.execute(
+                        """UPDATE agent_run_steps SET status='failed',completed_at=now(),
+                           error_category=$1,error_message=$2
+                           WHERE run_id=$3 AND status='running'""",
+                        category, error, row["id"],
+                    )
+                    steps = [dict(step) for step in await conn.fetch(
+                        "SELECT * FROM agent_run_steps WHERE run_id=$1 ORDER BY sequence_no",
+                        row["id"],
+                    )]
+                    completion = completion_from_steps(steps)
+                    if reconciliation_required:
+                        completion["side_effect_integrity"] = 0
+                    incident = build_incident(steps, category, error)
+                    status = (
+                        "partial" if any(step["status"] == "completed" for step in steps)
+                        else "failed"
+                    )
+                    updated = await conn.fetchrow(
+                        """UPDATE agent_runs SET status=$1,current_phase=$2,
+                           incident_summary=$3::jsonb,technical_completion=$4,
+                           functional_completion=$5,user_visible_completion=$6,
+                           side_effect_integrity=$7,error_category=$8,
+                           error_message=$9,completed_at=now(),current_step_id=NULL,
+                           lease_owner=NULL,lease_expires_at=NULL WHERE id=$10 RETURNING *""",
+                        status, "reconciliation" if reconciliation_required else status,
+                        json.dumps(incident), completion["technical_completion"],
+                        completion["functional_completion"],
+                        completion["user_visible_completion"],
+                        completion["side_effect_integrity"], category, error, row["id"],
+                    )
+                    await conn.execute(
+                        """INSERT INTO agent_run_events
+                           (run_id,user_id,event_type,phase,message,payload)
+                           VALUES($1,$2,$3,'recovery',$4,
+                                  $5::jsonb)""",
+                        row["id"], row["user_id"],
+                        ("write_reconciliation_required" if reconciliation_required
+                         else "lease_retry_exhausted"), error,
+                        json.dumps({
+                            "automatic_retry": False,
+                            "interrupted_steps": [step["step_key"] for step in interrupted],
+                        }),
+                    )
+                    terminal_recovery = {
+                        "run": dict(updated), "steps": steps, "completion": completion,
+                        "incident": incident, "error": error, "category": category,
+                        "reconciliation_required": reconciliation_required,
+                        "failed_step": next(
+                            (step for step in steps if step["status"] == "failed"), None
+                        ),
+                    }
+            if terminal_recovery is not None:
+                updated = None
+            else:
+                updated = await conn.fetchrow(
+                    """UPDATE agent_runs SET status='running',current_phase='execution',
+                       started_at=COALESCE(started_at,now()),heartbeat_at=now(),
+                       lease_owner=$1,lease_expires_at=now()+($2 * interval '1 second')
+                       WHERE id=$3 RETURNING *""",
+                    owner, lease, row["id"],
+                )
+        if terminal_recovery is None:
             return dict(updated)
+        failed_step = terminal_recovery["failed_step"]
+        run = terminal_recovery["run"]
+        try:
+            failure_record = await record_failure_incident(
+                pool,
+                occurrence_key=(
+                    f"run:{run['id']}:stale-write" if
+                    terminal_recovery["reconciliation_required"] else
+                    f"run:{run['id']}:stale-read-exhausted"
+                ),
+                run_id=run["id"],
+                session_id=run["session_id"], user_id=run["user_id"],
+                message=run["request"],
+                intent_kind=run.get("intent_kind") or "workspace_action",
+                stage="recovery", category=terminal_recovery["category"],
+                component="durable_worker", error=terminal_recovery["error"],
+                service=failed_step["service"] if failed_step else None,
+                operation=failed_step["operation"] if failed_step else None,
+                breaking_point=(failed_step["title"] if failed_step else None),
+                completion=terminal_recovery["completion"],
+                evidence={
+                    "automatic_retry": False,
+                    "reason": ("expired_write_lease" if
+                               terminal_recovery["reconciliation_required"] else
+                               "read_retry_budget_exhausted"),
+                },
+                policy=run.get("plan") or {},
+            )
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE agent_runs SET failure_fingerprint=$1 WHERE id=$2",
+                    failure_record["failure_fingerprint"], run["id"],
+                )
+        except Exception:
+            logger.exception("Unable to persist stale-write incident for run %s", run["id"])
+        await record_run_evaluation(pool, run["id"])
+        run_transitions.labels(run["status"]).inc()
+        run_failures.labels(terminal_recovery["category"]).inc()
+        return {**run, "_terminal_recovery": True}
 
 
 async def _heartbeat(pool, run_id, owner):
@@ -466,6 +603,8 @@ async def worker_loop(app, pool, stop_event: asyncio.Event):
     while not stop_event.is_set():
         run = await claim_run(pool, owner)
         if run:
+            if run.get("_terminal_recovery"):
+                continue
             await execute_run(app, pool, run)
             continue
         try:

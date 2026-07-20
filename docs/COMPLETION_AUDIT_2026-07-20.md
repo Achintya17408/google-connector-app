@@ -78,6 +78,13 @@ The corrected backfill created five sanitized incidents, five two-option reviews
 twenty channel-ledger rows. Admin/Grafana delivery is internal; email/GitHub remain
 skipped behind explicit configuration and approval.
 
+The teaching-phase lease audit then closed a narrower crash-recovery gap. Expired
+leases now requeue only bounded read-only work. An exhausted read becomes an ordinary
+worker failure, while a write interrupted before durable acknowledgement becomes a
+`worker_reconciliation` incident and cannot be resumed blindly. Integration tests
+cover replacement-worker execution, interrupted-read recovery, retry exhaustion, the
+uncertain-write terminal state, portal incident creation, and resume rejection.
+
 ## Correctly unresolved conclusions
 
 - Chunk-size, overlap, parent-size, query transformation, HyDE, reranker, and

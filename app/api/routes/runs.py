@@ -240,6 +240,17 @@ async def stop_run(run_id: str, request: Request):
 async def resume_run(run_id: str, body: RunResume, request: Request):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        reconciliation = await conn.fetchval(
+            """SELECT error_category='worker_reconciliation' FROM agent_runs
+               WHERE id=$1 AND user_id=$2""",
+            run_id, request.state.user_id,
+        )
+        if reconciliation:
+            raise HTTPException(
+                409,
+                "Automatic resume is blocked because an external write may already have "
+                "completed. Reconcile the Google resource before creating a replacement run.",
+            )
         result = await conn.execute(
             """UPDATE agent_runs SET status='queued',current_phase='queued',
                completed_at=NULL,error_category=NULL,error_message=NULL,
