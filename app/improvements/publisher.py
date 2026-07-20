@@ -50,8 +50,10 @@ async def publish_github_draft(proposal: dict, candidate_files: list[dict]) -> d
     repository = settings.github_proposal_repository.strip("/")
     if repository.count("/") != 1:
         raise RuntimeError("GITHUB_PROPOSAL_REPOSITORY must be owner/repository")
-    if proposal.get("candidate_state") != "validated_implementation" or not candidate_files:
-        raise RuntimeError("A validated implementation candidate with concrete files is required")
+    if proposal.get("candidate_state") not in {
+        "implementation_draft", "validated_implementation",
+    } or not candidate_files:
+        raise RuntimeError("A concrete implementation candidate is required")
     markdown = proposal_markdown(proposal)
     branch = f"governed/{proposal['proposal_key']}-{proposal['content_hash'][:8]}"
     path = f".improvement-proposals/{proposal['proposal_key']}.md"
@@ -78,6 +80,19 @@ async def publish_github_draft(proposal: dict, candidate_files: list[dict]) -> d
             created_ref.raise_for_status()
         files_to_publish = [
             {"path": path, "change_type": "create", "content": markdown},
+            {
+                "path": f".improvement-proposals/{proposal['proposal_key']}.json",
+                "change_type": "create",
+                "content": json.dumps({
+                    "proposal_key": proposal["proposal_key"],
+                    "content_hash": proposal["content_hash"],
+                    "build_id": (proposal.get("candidate_manifest") or {}).get("build_id"),
+                    "files": {
+                        item["path"]: item.get("content_hash")
+                        for item in candidate_files
+                    },
+                }, sort_keys=True, indent=2),
+            },
             *candidate_files,
         ]
         for item in files_to_publish:
@@ -128,3 +143,71 @@ def send_proposal_email(proposal: dict, recipient: str) -> dict:
         userId="me", body={"raw": raw}
     ).execute()
     return {"message_id": result.get("id")}
+
+
+async def dispatch_candidate_deployment(proposal: dict) -> dict:
+    """Start the already human-approved immutable candidate deployment workflow."""
+    settings = get_settings()
+    if not settings.github_proposal_token:
+        raise RuntimeError("GITHUB_PROPOSAL_TOKEN is not configured")
+    repository = settings.github_proposal_repository.strip("/")
+    url = f"https://api.github.com/repos/{repository}/actions/workflows/candidate-deploy.yml/dispatches"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {settings.github_proposal_token}",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        response = await client.post(url, json={
+            "ref": "main",
+            "inputs": {
+                "proposal_key": proposal["proposal_key"],
+                "candidate_version": proposal["candidate_version"],
+            },
+        })
+        response.raise_for_status()
+    return {"workflow": "candidate-deploy.yml", "status": "dispatched"}
+
+
+async def promote_candidate_pr(proposal: dict) -> dict:
+    """Mark the frozen draft ready and merge it after explicit human promotion."""
+    settings = get_settings()
+    if not settings.github_proposal_token:
+        raise RuntimeError("GITHUB_PROPOSAL_TOKEN is not configured")
+    draft = (proposal.get("candidate_manifest") or {}).get("draft_pr") or {}
+    number = draft.get("number")
+    if not number:
+        raise RuntimeError("The candidate draft PR reference is unavailable")
+    owner, repository_name = settings.github_proposal_repository.strip("/").split("/", 1)
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {settings.github_proposal_token}",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        query = await client.post("https://api.github.com/graphql", json={
+            "query": """query($owner:String!,$name:String!,$number:Int!){
+              repository(owner:$owner,name:$name){pullRequest(number:$number){id,isDraft}}
+            }""",
+            "variables": {"owner": owner, "name": repository_name, "number": int(number)},
+        })
+        query.raise_for_status()
+        pull = query.json()["data"]["repository"]["pullRequest"]
+        if pull["isDraft"]:
+            ready = await client.post("https://api.github.com/graphql", json={
+                "query": """mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id}}}""",
+                "variables": {"id": pull["id"]},
+            })
+            ready.raise_for_status()
+            if ready.json().get("errors"):
+                raise RuntimeError(str(ready.json()["errors"]))
+        merge = await client.put(
+            f"https://api.github.com/repos/{owner}/{repository_name}/pulls/{number}/merge",
+            json={"sha": proposal["candidate_version"], "merge_method": "squash",
+                  "commit_title": f"Promote governed candidate {proposal['proposal_key']}"},
+        )
+        merge.raise_for_status()
+    result = merge.json()
+    if not result.get("merged"):
+        raise RuntimeError(result.get("message") or "GitHub did not merge the candidate")
+    return {"number": number, "merged": True, "commit_sha": result.get("sha")}

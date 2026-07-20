@@ -3,9 +3,12 @@ import json
 import logging
 import socket
 import time
+import uuid
 from contextlib import suppress
 
 from app.config.settings import get_settings
+from app.agents.errors import ExecutionFailure
+from app.agents.supervisor import execute_tool_call, get_toolsets
 from app.db.google_clients import request_google_credentials
 from app.db.oauth_credentials import load_google_credentials
 from app.runs.incident import build_incident, completion_from_steps
@@ -15,11 +18,15 @@ from app.improvements.failure_intelligence import record_failure_incident
 from app.runs.verifier import verify_executions
 from app.mlops.metrics import run_duration, run_failures, run_transitions
 from app.evaluation.collector import record_run_evaluation
+from app.tools.base import GoogleWorkspaceBaseTool
+from app.tools.result_projection import project_tool_result
 
 logger = logging.getLogger(__name__)
 
 
 def classify_error(exc: Exception) -> str:
+    if isinstance(exc, ExecutionFailure):
+        return exc.category
     text = str(exc).lower()
     if "429" in text or "rate limit" in text or "quota" in text:
         return "rate_limit"
@@ -35,7 +42,12 @@ def classify_error(exc: Exception) -> str:
 
 
 async def claim_run(pool, owner: str):
-    lease = get_settings().worker_lease_seconds
+    settings = get_settings()
+    lease = settings.worker_lease_seconds
+    executor_version = settings.executor_version or settings.deployment_version
+    executor_role = settings.executor_role
+    if executor_role not in {"control", "candidate"}:
+        raise RuntimeError("EXECUTOR_ROLE must be control or candidate")
     while True:
         terminal_recovery = None
         async with pool.acquire() as conn, conn.transaction():
@@ -43,9 +55,14 @@ async def claim_run(pool, owner: str):
                 """SELECT * FROM agent_runs
                    WHERE (status='queued' OR
                          (status='running' AND lease_expires_at < now()))
+                     AND (($2='candidate' AND executor_version=$1
+                           AND cohort_assignment='candidate')
+                          OR ($2='control' AND cohort_assignment='control'
+                              AND (canary_id IS NULL OR executor_version=$1)))
                      AND deleted_at IS NULL
                    ORDER BY queued_at
-                   FOR UPDATE SKIP LOCKED LIMIT 1"""
+                   FOR UPDATE SKIP LOCKED LIMIT 1""",
+                executor_version, executor_role,
             )
             if not row:
                 return None
@@ -148,9 +165,11 @@ async def claim_run(pool, owner: str):
                 updated = await conn.fetchrow(
                     """UPDATE agent_runs SET status='running',current_phase='execution',
                        started_at=COALESCE(started_at,now()),heartbeat_at=now(),
+                       executor_version=CASE WHEN canary_id IS NULL THEN $4
+                                             ELSE executor_version END,
                        lease_owner=$1,lease_expires_at=now()+($2 * interval '1 second')
                        WHERE id=$3 RETURNING *""",
-                    owner, lease, row["id"],
+                    owner, lease, row["id"], executor_version,
                 )
         if terminal_recovery is None:
             return dict(updated)
@@ -282,7 +301,27 @@ async def _dependency_context(conn, step):
            WHERE run_id=$1 AND step_key=ANY($2::text[]) ORDER BY sequence_no""",
         step["run_id"], step["dependencies"],
     )
-    return [dict(row) for row in rows]
+    projected = []
+    for row in rows:
+        value = dict(row)
+        envelope = project_tool_result(
+            "dependency_output", value.get("output_data") or {},
+            max_tokens=get_settings().groq_tool_result_max_tokens,
+        )
+        value["output_data"] = envelope.compact_result
+        value["projection"] = envelope.metadata()
+        projected.append(value)
+    return projected
+
+
+def _persistable_executions(executions: list[dict]) -> list[dict]:
+    """Remove raw payloads while retaining compact evidence and lineage."""
+    return [{
+        "tool": item.get("tool"),
+        "arguments": item.get("arguments") or {},
+        "result": item.get("compact_result", item.get("result")),
+        "projection": item.get("projection") or {},
+    } for item in executions]
 
 
 async def _store_artifacts(conn, run, step, artifacts):
@@ -347,6 +386,37 @@ async def _execute_step(app, pool, run, step, dependencies):
             payload={"artifact_count": 0, "model_calls": 0, "tool_calls": 0},
         )
         return output
+    if step.get("operation") == "recent_senders":
+        tools = {tool.name: tool for tool in get_toolsets()["gmail"]}
+        tool = tools["list_recent_gmail_senders"]
+        if isinstance(tool, GoogleWorkspaceBaseTool):
+            tool.db_pool = pool
+        state = {
+            "session_id": run["session_id"], "user_id": user_id,
+            "run_id": str(run_id), "step_id": str(step["id"]),
+        }
+        call = {
+            "id": f"deterministic-{uuid.uuid4()}",
+            "name": tool.name,
+            "args": input_data.get("tool_arguments") or {"max_results": 20},
+        }
+        _, raw_result, envelope = await execute_tool_call(tool, call, state, pool)
+        executions = [{
+            "tool": tool.name, "arguments": call["args"], "result": raw_result,
+            "compact_result": envelope.compact_result,
+            "projection": envelope.metadata(),
+        }]
+        result = {
+            "output": (
+                f"Found {raw_result.get('returned', 0)} recent Gmail sender"
+                f"{'s' if raw_result.get('returned', 0) != 1 else ''}."
+            ),
+            "tool_results": [envelope.compact_result],
+            "tool_executions": executions,
+            "task_complete": True,
+        }
+    else:
+        result = None
     dependency_text = json.dumps(dependencies, default=str)
     scoped_message = (
         f"Overall request: {run['request']}\n\n"
@@ -363,9 +433,10 @@ async def _execute_step(app, pool, run, step, dependencies):
             run["risk_level"] == "low" and len((run["plan"] or {}).get("services", [])) <= 1
         ),
     }
-    result = await app.state.agent_graph.ainvoke(
-        initial, config={"configurable": {"thread_id": f"{run_id}:{step['step_key']}"}}
-    )
+    if result is None:
+        result = await app.state.agent_graph.ainvoke(
+            initial, config={"configurable": {"thread_id": f"{run_id}:{step['step_key']}"}}
+        )
     output = result.get("output", "")
     executions = result.get("tool_executions", [])
     if executions:
@@ -376,6 +447,10 @@ async def _execute_step(app, pool, run, step, dependencies):
     else:
         verified, evidence, artifacts = verify_step(step, result)
     elapsed_ms = int((time.perf_counter() - step_started) * 1000)
+    persisted_executions = _persistable_executions(executions)
+    error_category = result.get("error_category")
+    if not verified and error_category:
+        evidence = result.get("error") or evidence
     async with pool.acquire() as conn:
         await conn.execute(
             """UPDATE agent_run_steps SET status=$1,output_data=$2::jsonb,
@@ -383,8 +458,9 @@ async def _execute_step(app, pool, run, step, dependencies):
                WHERE id=$6""",
             "completed" if verified else "failed",
             json.dumps({"output": output, "tool_results": result.get("tool_results", []),
-                        "tool_executions": executions, "verification": evidence}, default=str),
-            elapsed_ms, None if verified else "verification",
+                        "tool_executions": persisted_executions,
+                        "verification": evidence}, default=str),
+            elapsed_ms, None if verified else (error_category or "verification"),
             None if verified else evidence, step["id"],
         )
         await _store_artifacts(conn, run, step, artifacts)
@@ -395,7 +471,15 @@ async def _execute_step(app, pool, run, step, dependencies):
         payload={"artifacts": len(artifacts)},
     )
     if not verified:
-        raise RuntimeError(evidence)
+        raise ExecutionFailure(
+            evidence,
+            category=error_category or "verification",
+            component=result.get("error_component") or "step_executor",
+            boundary=result.get("error_boundary") or "postcondition_verification",
+            evidence=result.get("error_evidence") or {
+                "service": step.get("service"), "operation": step.get("operation"),
+            },
+        )
     await append_event(pool, run_id, user_id, "step_completed", step_id=step["id"],
                        phase="execution", message=output,
                        payload={"artifact_count": len(artifacts)})
@@ -569,13 +653,16 @@ async def execute_run(app, pool, run):
                 session_id=run["session_id"], user_id=user_id,
                 message=run["request"], intent_kind=run.get("intent_kind") or "workspace_action",
                 stage=("verification" if category == "verification" else "execution"),
-                category=category, component="durable_worker", error=str(exc),
+                category=category,
+                component=getattr(exc, "component", "durable_worker"), error=str(exc),
                 service=failed_step["service"] if failed_step else None,
                 operation=failed_step["operation"] if failed_step else None,
                 breaking_point=(failed_step["title"] if failed_step else incident.get("breaking_point")),
                 completion=completion,
                 evidence={"run_event": f"run_{terminal_status}",
-                          "step_key": failed_step["step_key"] if failed_step else None},
+                          "step_key": failed_step["step_key"] if failed_step else None,
+                          "boundary": getattr(exc, "boundary", None),
+                          **getattr(exc, "evidence", {})},
                 policy=run.get("plan") or {},
             )
             async with pool.acquire() as conn:

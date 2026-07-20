@@ -34,10 +34,19 @@ def validate_candidate_files(files: list[dict]) -> list[str]:
     return errors
 
 
-def candidate_digest(base_version: str, files: list[dict], validation_report: dict) -> str:
+def candidate_digest(
+    base_version: str, files: list[dict], validation_report: dict, *,
+    candidate_kind: str | None = None, candidate_version: str | None = None,
+    exact_diff: str | None = None, rollback_plan: dict | None = None,
+    deployment_evidence: dict | None = None,
+) -> str:
+    """Bind every reviewed artifact into one canonical approval digest."""
     canonical = json.dumps(
         {"base_version": base_version, "files": files,
-         "validation_report": validation_report},
+         "candidate_kind": candidate_kind, "candidate_version": candidate_version,
+         "exact_diff": exact_diff, "validation_report": validation_report,
+         "rollback_plan": rollback_plan or {},
+         "deployment_evidence": deployment_evidence or {}},
         sort_keys=True, separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()

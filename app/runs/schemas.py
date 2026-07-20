@@ -71,6 +71,12 @@ class ImprovementDecision(BaseModel):
     note: str | None = Field(default=None, max_length=4_000)
 
 
+class CanaryActivationDecision(ImprovementDecision):
+    traffic_percent: int = Field(default=5, ge=1, le=50)
+    allowed_users: list[str] = Field(default_factory=list, max_length=200)
+    denied_users: list[str] = Field(default_factory=list, max_length=200)
+
+
 class ImprovementCandidateFile(BaseModel):
     path: str = Field(min_length=1, max_length=500)
     change_type: Literal["create", "replace", "delete"]
@@ -93,3 +99,28 @@ class ImprovementDeploymentEvidence(BaseModel):
     deployment_url: str = Field(min_length=1, max_length=2_000)
     verified: bool
     smoke_tests: dict[str, Any]
+
+
+class CandidateValidationAttestation(BaseModel):
+    commit_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    tree_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    repository: str = Field(min_length=3, max_length=300)
+    workflow: str = Field(min_length=1, max_length=300)
+    run_id: str = Field(min_length=1, max_length=100)
+    suite_version: str = Field(min_length=1, max_length=100)
+    commands: list[str] = Field(min_length=1, max_length=50)
+    results: dict[str, Any]
+    file_hashes: dict[str, str]
+    log_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    passed: bool
+
+
+class CandidateDeploymentAttestation(BaseModel):
+    candidate_version: str = Field(pattern=r"^[0-9a-f]{40}$")
+    deployment_id: str = Field(min_length=1, max_length=300)
+    service_name: str = Field(min_length=1, max_length=200)
+    project_id: str = Field(min_length=1, max_length=200)
+    workflow: str = Field(min_length=1, max_length=300)
+    run_id: str = Field(min_length=1, max_length=100)
+    smoke_tests: dict[str, Any]
+    verified: bool

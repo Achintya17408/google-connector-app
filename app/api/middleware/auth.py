@@ -213,6 +213,24 @@ async def auth_middleware(request: Request, call_next):
     ) or (request.url.path == "/auth/google" and request.method == "DELETE")
     if not protected:
         return await call_next(request)
+    if (request.method == "POST"
+            and request.url.path.startswith("/admin/candidate-builds/")
+            and request.url.path.endswith("/attestation")):
+        supplied = request.headers.get("x-candidate-attestation-token", "")
+        expected = get_settings().candidate_ci_attestation_token
+        if expected and secrets.compare_digest(supplied, expected):
+            request.state.user_id = "trusted-ci"
+            request.state.is_admin = True
+            return await call_next(request)
+    if (request.method == "POST"
+            and request.url.path.startswith("/admin/improvements/")
+            and request.url.path.endswith("/deployment-attestation")):
+        supplied = request.headers.get("x-candidate-deploy-token", "")
+        expected = get_settings().candidate_deploy_attestation_token
+        if expected and secrets.compare_digest(supplied, expected):
+            request.state.user_id = "trusted-deployment-controller"
+            request.state.is_admin = True
+            return await call_next(request)
     header = request.headers.get("authorization", "")
     try:
         raw = header.split(" ", 1)[1] if header.lower().startswith("bearer ") else ""

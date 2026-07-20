@@ -12,7 +12,29 @@ async def retrieve_operational_knowledge(
     started = time.perf_counter()
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
+        bundle_hash = None
+        if run_id:
+            bundle_hash = await conn.fetchval(
+                "SELECT okf_bundle_version FROM agent_runs WHERE id=$1", run_id,
+            )
+        if bundle_hash:
+            rows = await conn.fetch(
+                """SELECT d.document_id AS id,d.title,d.concept_type,d.version,
+                          c.heading,c.content,
+                          ts_rank_cd(to_tsvector('english',d.title||' '||
+                            coalesce(c.heading,'')||' '||c.content),
+                            websearch_to_tsquery('english',$1)) AS score
+                   FROM okf_bundle_chunks c JOIN okf_bundle_documents d
+                     ON d.bundle_hash=c.bundle_hash AND d.document_id=c.document_id
+                   WHERE d.bundle_hash=$2
+                     AND (d.visibility='public' OR ($4=TRUE AND d.visibility='private'))
+                     AND to_tsvector('english',d.title||' '||coalesce(c.heading,'')||' '||c.content)
+                         @@ websearch_to_tsquery('english',$1)
+                   ORDER BY score DESC,d.document_id,c.chunk_index LIMIT $3""",
+                query, bundle_hash, limit, include_private,
+            )
+        else:
+            rows = await conn.fetch(
             """SELECT d.id,d.title,d.concept_type,d.version,c.heading,c.content,
                       ts_rank_cd(
                         to_tsvector('english',coalesce(d.title,'') || ' ' ||
@@ -27,7 +49,7 @@ async def retrieve_operational_knowledge(
                      @@ websearch_to_tsquery('english',$1)
                ORDER BY score DESC,d.id,c.chunk_index LIMIT $2""",
             query, limit, include_private,
-        )
+            )
         documents = [dict(row) for row in rows]
         if run_id:
             await conn.execute(

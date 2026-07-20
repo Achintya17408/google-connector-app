@@ -1,0 +1,60 @@
+name: Governed candidate validation
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.improvement-proposals/**'
+      - 'app/**'
+      - 'tests/**'
+      - 'knowledge/**'
+      - 'config/**'
+      - 'docs/**'
+      - 'web/**'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: agent_db
+          POSTGRES_USER: agent_user
+          POSTGRES_PASSWORD: agent_pass_2024
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U agent_user -d agent_db"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: {python-version: '3.12'}
+      - run: pip install -r requirements.txt
+      - name: Validate candidate with no production credentials
+        id: tests
+        env:
+          ALLOW_DEV_AUTH: 'true'
+          JWT_SECRET_KEY: automated-test-only-secret-at-least-32-bytes
+          DATABASE_URL: postgresql://agent_user:agent_pass_2024@localhost:5432/agent_db
+          ASYNC_DATABASE_URL: postgresql+asyncpg://agent_user:agent_pass_2024@localhost:5432/agent_db
+        run: |
+          alembic upgrade head
+          pytest tests/ -q 2>&1 | tee candidate-tests.log
+          python scripts/run_golden_evals.py 2>&1 | tee -a candidate-tests.log
+          python scripts/run_workflow_replays.py 2>&1 | tee -a candidate-tests.log
+          python scripts/run_policy_evals.py 2>&1 | tee -a candidate-tests.log
+          python scripts/run_context_packing_evals.py 2>&1 | tee -a candidate-tests.log
+          python -m compileall -q app
+      - name: Submit trusted validation attestation
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          CANDIDATE_ATTESTATION_URL: ${{ secrets.CANDIDATE_ATTESTATION_URL }}
+          CANDIDATE_CI_ATTESTATION_TOKEN: ${{ secrets.CANDIDATE_CI_ATTESTATION_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/submit_candidate_attestation.py

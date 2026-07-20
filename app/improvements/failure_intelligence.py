@@ -139,6 +139,36 @@ def analyze_failure(
             ),
         ]
         recommended, reason = "A", "Preventing unauthorized execution is safer than recovering later."
+    elif category == "model_context_length":
+        title = "Model context overflow after a tool result"
+        root = "The executor attempted a model call whose messages or completion exceeded the provider context limit."
+        factors = [
+            "A live tool result may have exposed more fields or body content than the next reasoning step required.",
+            "Context size must be measured before every provider call, including tool schemas and completion reserve.",
+        ]
+        options = [
+            _option(
+                "A", "Add exact metadata projection plus universal result bounds",
+                "Use a metadata-only operation for this request shape and enforce a typed, token-bounded result envelope for every tool.",
+                [component, service or "tool registry", "tool result projector", "context preflight"],
+                ["The exact replay never fetches unneeded bodies.",
+                 "Every provider call stays inside its measured context budget.",
+                 "An unavoidable overflow is recorded as model_context_length, not generic execution."],
+                "Best correctness and efficiency; field projections need tool-specific regression tests.",
+                automation_eligible=True,
+            ),
+            _option(
+                "B", "Store large results out of band and continue from compact references",
+                "Persist authorized full results outside model history, pass only bounded summaries and stable references, and retrieve selected content on demand.",
+                ["artifact/result store", "context manager", "on-demand content retrieval"],
+                ["Raw bodies never enter durable step output.",
+                 "References retain ownership and permission scope.",
+                 "Large-content tasks can resume without repeating the Google read."],
+                "More general for content-heavy work, but adds storage and retrieval complexity.",
+                automation_eligible=True,
+            ),
+        ]
+        recommended, reason = "A", "Exact projection fixes the observed path and the universal envelope prevents the broader class."
     elif category in {"rate_limit", "network"}:
         title = "Transient quota or network failure"
         root = "A temporary upstream or quota condition interrupted the selected operation."
@@ -326,10 +356,17 @@ async def create_or_update_proposal(pool, incident_id, selected_option: str, act
             proposal_id, f"failure_option_{selected_option}_{str(incident_id)[:8]}", payload,
         )
         proposal = await conn.fetchrow(
-            "SELECT proposal_key,status,candidate_state,content_hash FROM improvement_proposals WHERE id=$1",
+            "SELECT id,proposal_key,status,candidate_state,content_hash FROM improvement_proposals WHERE id=$1",
             proposal_id,
         )
-    return dict(proposal)
+    from app.improvements.builder import enqueue_candidate_build
+    build_id = await enqueue_candidate_build(
+        pool, proposal_id, dict(incident), option, actor,
+    )
+    result = dict(proposal)
+    result["candidate_build_id"] = str(build_id) if build_id else None
+    result["candidate_build_status"] = "queued" if build_id else "disabled"
+    return result
 
 
 async def record_failure_incident(
@@ -385,6 +422,29 @@ async def record_failure_incident(
             payload["recommended_option"], payload["recommendation_reason"],
             payload["risk_level"], payload["automation_eligible"],
         )
+        await conn.execute(
+            """INSERT INTO failure_clusters
+               (cluster_key,stage,category,component,service,operation,title,
+                normalized_signature,occurrence_count,first_seen,last_seen,
+                latest_incident_id,metadata)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,now(),now(),$9,$10::jsonb)
+               ON CONFLICT(cluster_key) DO UPDATE SET
+                 last_seen=now(),latest_incident_id=excluded.latest_incident_id,
+                 title=excluded.title,metadata=failure_clusters.metadata||excluded.metadata""",
+            cluster, stage, category, component, service, operation, analysis["title"],
+            normalize_error(error), incident["id"],
+            json.dumps({"risk_level": analysis["risk_level"]}),
+        )
+        membership = await conn.execute(
+            """INSERT INTO failure_cluster_occurrences(cluster_key,incident_id)
+               VALUES($1,$2) ON CONFLICT DO NOTHING""",
+            cluster, incident["id"],
+        )
+        if membership.endswith("1"):
+            await conn.execute(
+                """UPDATE failure_clusters SET occurrence_count=occurrence_count+1,
+                   last_seen=now() WHERE cluster_key=$1""", cluster,
+            )
         notification_payload = json.dumps({
             "incident_id": str(incident["id"]), "cluster_key": cluster,
             "stage": stage, "category": category, "risk_level": analysis["risk_level"],

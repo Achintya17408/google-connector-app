@@ -49,6 +49,10 @@ def _number(value, default: float) -> float:
 def assess_canary(control: dict, candidate: dict) -> dict:
     """Apply explicit multi-objective gates without collapsing them into one reward."""
     if control["total"] < CANARY_MIN_SAMPLES or candidate["total"] < CANARY_MIN_SAMPLES:
+        if candidate.get("unsafe"):
+            return {"ready": True, "passed": False,
+                    "regressions": ["side_effect_integrity"],
+                    "safety_tripwire": True}
         return {"ready": False, "passed": False, "regressions": ["insufficient_samples"]}
     control_failure = control["failed"] / control["total"]
     candidate_failure = candidate["failed"] / candidate["total"]
@@ -71,6 +75,11 @@ def assess_canary(control: dict, candidate: dict) -> dict:
     candidate_tokens = float(candidate.get("avg_tokens") or 0)
     if control_tokens and candidate_tokens > control_tokens * CANARY_TOKEN_RATIO:
         regressions.append("average_tokens")
+    for metric in ("technical", "functional", "user_visible"):
+        control_value = float(control.get(f"avg_{metric}") or 0)
+        candidate_value = float(candidate.get(f"avg_{metric}") or 0)
+        if candidate_value + 1 < control_value:
+            regressions.append(f"{metric}_completion")
     return {
         "ready": True, "passed": not regressions, "regressions": regressions,
         "control_failure_rate": control_failure,
@@ -133,6 +142,72 @@ async def analyze_recent_failures(pool) -> int:
             )
             continue
     return created
+
+
+async def analyze_cross_cluster_themes(pool) -> int:
+    """Create systemic trends only from multiple specific, durable clusters."""
+    async with pool.acquire() as conn:
+        clusters = [dict(row) for row in await conn.fetch(
+            """SELECT * FROM failure_clusters WHERE status='active'
+               AND occurrence_count>0 ORDER BY last_seen DESC LIMIT 500"""
+        )]
+    groups = {}
+    for cluster in clusters:
+        if cluster["category"] == "model_context_length":
+            theme = (
+                "unbounded-tool-context",
+                "Bound every tool-to-model data boundary",
+                "Several specific tool paths can exceed the provider context unless projection and preflight are universal.",
+            )
+        elif cluster["category"] in {"rate_limit", "network"}:
+            theme = (
+                "transient-upstream-resilience",
+                "Make upstream interruption recovery idempotent",
+                "Repeated provider and network clusters require shared quota, retry, and resume policy.",
+            )
+        elif cluster["category"] in {"planning", "execution"}:
+            theme = (
+                "planner-tool-contract",
+                "Align planning and executable tool contracts",
+                "Several concrete planning/execution clusters indicate an architectural contract gap.",
+            )
+        else:
+            continue
+        groups.setdefault(theme, []).append(cluster)
+    changed = 0
+    for (theme_key, title, cause), members in groups.items():
+        # A policy trend requires either multiple specific clusters or repeated
+        # evidence in one cluster; a broad category alone is never sufficient.
+        if len(members) < 2 and sum(row["occurrence_count"] for row in members) < 3:
+            continue
+        options = [
+            {"id": "A", "title": f"Implement the shared {title.lower()} policy",
+             "explanation": "Generate one replay-backed candidate covering all linked clusters."},
+            {"id": "B", "title": "Keep cluster-specific fixes isolated",
+             "explanation": "Build separate candidates until shared behavior is proven by replay."},
+        ]
+        async with pool.acquire() as conn, conn.transaction():
+            theme_id = await conn.fetchval(
+                """INSERT INTO failure_themes
+                   (theme_key,title,systemic_cause,strategy_options,recommended_option,
+                    occurrence_count,first_seen,last_seen,metadata)
+                   VALUES($1,$2,$3,$4::jsonb,'A',$5,now(),now(),$6::jsonb)
+                   ON CONFLICT(theme_key) DO UPDATE SET
+                     occurrence_count=excluded.occurrence_count,last_seen=now(),
+                     strategy_options=excluded.strategy_options,metadata=excluded.metadata
+                   RETURNING id""",
+                theme_key, title, cause, json.dumps(options),
+                sum(row["occurrence_count"] for row in members),
+                json.dumps({"cluster_count": len(members), "category_only": False}),
+            )
+            for member in members:
+                await conn.execute(
+                    """INSERT INTO failure_theme_clusters(theme_id,cluster_key,confidence)
+                       VALUES($1,$2,90) ON CONFLICT DO NOTHING""",
+                    theme_id, member["cluster_key"],
+                )
+        changed += 1
+    return changed
 
 
 async def analyze_recent_failure_categories_legacy(pool) -> int:
@@ -229,8 +304,7 @@ async def evaluate_active_canaries(pool) -> int:
     changed = 0
     async with pool.acquire() as conn:
         canaries = await conn.fetch(
-            """SELECT * FROM improvement_canaries
-               WHERE status='active' AND started_at <= now()-interval '1 hour'"""
+            """SELECT * FROM improvement_canaries WHERE status='active'"""
         )
     for canary in canaries:
         async with pool.acquire() as conn, conn.transaction():
@@ -247,24 +321,32 @@ async def evaluate_active_canaries(pool) -> int:
                           count(*) FILTER(WHERE status IN ('failed','partial')) AS failed,
                           count(*) FILTER(WHERE status='cancelled') AS cancelled,
                           count(*) FILTER(WHERE side_effect_integrity<100) AS unsafe,
+                          avg(technical_completion) AS avg_technical,
+                          avg(functional_completion) AS avg_functional,
+                          avg(user_visible_completion) AS avg_user_visible,
                           avg(coalesce(input_tokens,0)+coalesce(output_tokens,0)) AS avg_tokens,
                           percentile_cont(0.95) WITHIN GROUP
                             (ORDER BY extract(epoch FROM (completed_at-started_at))*1000)
                             FILTER(WHERE completed_at IS NOT NULL AND started_at IS NOT NULL) AS p95_ms
-                   FROM agent_runs WHERE deployment_version=$1 AND queued_at >= $2""",
-                canary["control_version"], canary["started_at"],
+                   FROM agent_runs WHERE canary_id=$1 AND cohort_assignment='control'
+                     AND queued_at >= $2""",
+                canary["id"], canary["started_at"],
             )
             candidate = await conn.fetchrow(
                 """SELECT count(*) AS total,
                           count(*) FILTER(WHERE status IN ('failed','partial')) AS failed,
                           count(*) FILTER(WHERE status='cancelled') AS cancelled,
                           count(*) FILTER(WHERE side_effect_integrity<100) AS unsafe,
+                          avg(technical_completion) AS avg_technical,
+                          avg(functional_completion) AS avg_functional,
+                          avg(user_visible_completion) AS avg_user_visible,
                           avg(coalesce(input_tokens,0)+coalesce(output_tokens,0)) AS avg_tokens,
                           percentile_cont(0.95) WITHIN GROUP
                             (ORDER BY extract(epoch FROM (completed_at-started_at))*1000)
                             FILTER(WHERE completed_at IS NOT NULL AND started_at IS NOT NULL) AS p95_ms
-                   FROM agent_runs WHERE deployment_version=$1 AND queued_at >= $2""",
-                canary["candidate_version"], canary["started_at"],
+                   FROM agent_runs WHERE canary_id=$1 AND cohort_assignment='candidate'
+                     AND queued_at >= $2""",
+                canary["id"], canary["started_at"],
             )
             control_data = dict(control)
             candidate_data = dict(candidate)
@@ -289,13 +371,23 @@ async def evaluate_active_canaries(pool) -> int:
             )
             await conn.execute(
                 """UPDATE improvement_canaries SET status=$1,metrics=$2::jsonb,ended_at=now(),
-                     rollback_reason=$3 WHERE id=$4""",
+                     rollback_reason=$3,routing_enabled=$5,
+                     rollback_at=CASE WHEN $5=FALSE THEN now() END WHERE id=$4""",
                 canary_status, json.dumps(metrics, default=str),
                 None if passed else "Candidate breached: " + ", ".join(
                     assessment["regressions"]
                 ),
-                canary["id"],
+                canary["id"], passed,
             )
+            if not passed:
+                await conn.execute(
+                    """UPDATE agent_runs SET executor_version=$1,
+                       cohort_assignment='control',assignment_reason='automatic canary rollback'
+                       WHERE canary_id=$2 AND cohort_assignment='candidate' AND status='queued'
+                         AND NOT EXISTS(SELECT 1 FROM agent_run_steps s
+                           WHERE s.run_id=agent_runs.id AND s.status IN ('running','completed'))""",
+                    canary["control_version"], canary["id"],
+                )
             await conn.execute(
                 "UPDATE improvement_proposals SET status=$1,updated_at=now() WHERE id=$2",
                 proposal_status, canary["proposal_id"],
@@ -327,6 +419,7 @@ async def improvement_analysis_loop(pool, stop_event: asyncio.Event):
     while not stop_event.is_set():
         await expire_stale_proposals(pool)
         await analyze_recent_failures(pool)
+        await analyze_cross_cluster_themes(pool)
         await evaluate_active_canaries(pool)
         with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(stop_event.wait(), timeout=3600)
+            await asyncio.wait_for(stop_event.wait(), timeout=60)

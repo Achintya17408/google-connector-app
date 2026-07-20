@@ -6,6 +6,8 @@ from typing import Any
 from langchain_core.tools import BaseTool
 from pydantic import ConfigDict
 from app.mlops.metrics import tool_errors, tool_latency
+from app.config.settings import get_settings
+from app.tools.result_projection import project_tool_result
 
 tool_session_id: ContextVar[str | None] = ContextVar("tool_session_id", default=None)
 tool_user_id: ContextVar[str | None] = ContextVar("tool_user_id", default=None)
@@ -75,7 +77,11 @@ class GoogleWorkspaceTool(GoogleWorkspaceBaseTool):
                 _persistence_tasks.add(task)
                 task.add_done_callback(_persistence_tasks.discard)
             await self._log_task(
-                tool_session_id.get(), self.name, kwargs, result,
+                tool_session_id.get(), self.name, kwargs,
+                project_tool_result(
+                    self.name, result,
+                    max_tokens=get_settings().groq_tool_result_max_tokens,
+                ).compact_result,
                 "success", total_latency_ms=int(elapsed * 1000),
             )
             return result

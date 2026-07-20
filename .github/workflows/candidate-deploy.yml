@@ -1,0 +1,46 @@
+name: Deploy governed candidate
+on:
+  workflow_dispatch:
+    inputs:
+      proposal_key:
+        description: Frozen proposal key approved for canary
+        required: true
+      candidate_version:
+        description: Exact validated 40-character commit SHA
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.candidate_version }}
+      - name: Verify immutable candidate commit
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.candidate_version }}"
+      - name: Pin candidate worker and deploy its exact source
+        run: |
+          printf '%s' '${{ inputs.candidate_version }}' | npx -y @railway/cli@latest variable set EXECUTOR_VERSION --stdin --service google-connector-candidate-worker --skip-deploys >/dev/null
+          printf '%s' '${{ inputs.candidate_version }}' | npx -y @railway/cli@latest variable set DEPLOYMENT_VERSION --stdin --service google-connector-candidate-worker --skip-deploys >/dev/null
+          printf '%s' 'candidate' | npx -y @railway/cli@latest variable set EXECUTOR_ROLE --stdin --service google-connector-candidate-worker --skip-deploys >/dev/null
+          npx -y @railway/cli@latest up --service google-connector-candidate-worker --detach --yes
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      - name: Wait for candidate worker deployment
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: python scripts/wait_candidate_deployment.py
+      - name: Register trusted deployment evidence
+        env:
+          CANDIDATE_ATTESTATION_URL: ${{ secrets.CANDIDATE_ATTESTATION_URL }}
+          CANDIDATE_DEPLOY_ATTESTATION_TOKEN: ${{ secrets.CANDIDATE_DEPLOY_ATTESTATION_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_CANDIDATE_WORKER_SERVICE: google-connector-candidate-worker
+          PROPOSAL_KEY: ${{ inputs.proposal_key }}
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+        run: python scripts/submit_candidate_deployment.py

@@ -94,6 +94,7 @@ SERVICE_OPERATION_PATTERNS = {
 }
 
 OPERATION_TOOLS = {
+    ("gmail", "recent_senders"): ["list_recent_gmail_senders"],
     ("gmail", "search"): ["search_gmail", "get_gmail_message", "list_gmail_threads"],
     ("gmail", "send"): ["send_gmail"], ("gmail", "reply"): ["get_gmail_message", "reply_gmail"],
     ("gmail", "label"): ["get_gmail_message", "label_gmail"],
@@ -129,7 +130,7 @@ OPERATION_TOOLS = {
     ("meet", "conferences"): ["list_meet_conferences", "get_meet_space"],
     ("meet", "get"): ["get_meet_space"],
 }
-READ_OPERATIONS = {"search", "get", "read", "list", "availability", "list_spaces",
+READ_OPERATIONS = {"search", "recent_senders", "get", "read", "list", "availability", "list_spaces",
                    "participants", "conferences"}
 DEFAULT_READ_OPERATION = {
     "gmail": "search", "calendar": "list", "drive": "search", "docs": "read",
@@ -140,6 +141,12 @@ DEFAULT_READ_OPERATION = {
 
 def infer_operation(service: str, message: str, write: bool) -> str:
     text = message.lower()
+    if service == "gmail" and re.search(
+        r"\b(?:people|persons?|senders?|names?)\b.{0,80}\b(?:mail|email)s?\b|"
+        r"\b(?:mail|email)s?\b.{0,80}\b(?:people|persons?|senders?|names?)\b",
+        text,
+    ):
+        return "recent_senders"
     anchors = [match.start() for term in SERVICES.get(service, (service,))
                for match in re.finditer(rf"\b{re.escape(term)}\b", text)]
     candidates = []
@@ -280,6 +287,14 @@ def build_plan(message: str) -> tuple[ExecutionPlan, dict]:
             dependencies = ["execute_sheets"]
         elif policy["write"] and service != "gmail" and produced_data:
             dependencies = [produced_data[-1]]
+        count_match = re.search(r"\b(?:last|latest|recent)\s+(\d{1,3})\b", message.lower())
+        exact_tool_arguments = {}
+        if service == "gmail" and operation == "recent_senders":
+            exact_tool_arguments = {
+                "max_results": min(int(count_match.group(1)), 100) if count_match else 20,
+                "query": "-in:sent",
+                "unique": not bool(re.search(r"\b(?:keep|include) duplicates?\b", message.lower())),
+            }
         steps.append(PlanStep(
             id=step_id,
             title=f"Execute and verify the {service} portion",
@@ -288,6 +303,7 @@ def build_plan(message: str) -> tuple[ExecutionPlan, dict]:
             dependencies=dependencies,
             arguments={"request": message, "service": service,
                        "allowed_tools": OPERATION_TOOLS.get((service, operation), []),
+                       "tool_arguments": exact_tool_arguments,
                        "workflow_hints": {
                            "extract_unique_sender_names": service == "gmail" and "people" in message.lower(),
                            "sheet_url_is_drive_link": policy["sheet_url_is_drive_link"],

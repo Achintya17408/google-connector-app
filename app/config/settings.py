@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     groq_reasoning_model: str = "openai/gpt-oss-120b"
     groq_fallback_model: str = "llama-3.1-8b-instant"
     groq_max_tokens: int = 800
+    groq_context_window_tokens: int = 32768
+    groq_tool_result_max_tokens: int = 2000
+    groq_context_safety_tokens: int = 1024
     database_url: str = "postgresql://agent_user:agent_pass_2024@localhost:5432/agent_db"
     async_database_url: str = "postgresql+asyncpg://agent_user:agent_pass_2024@localhost:5432/agent_db"
     langchain_tracing_v2: str = "true"
@@ -33,6 +36,8 @@ class Settings(BaseSettings):
     admin_emails: str = "achintyat256@gmail.com"
     railway_url: str = ""
     railway_public_domain: str = ""
+    railway_project_id: str = ""
+    railway_candidate_worker_service: str = "google-connector-candidate-worker"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     neon_database_url: str = ""
     ollama_host: str = "http://localhost:11434"
@@ -54,6 +59,13 @@ class Settings(BaseSettings):
     max_embedding_payload_chars: int = 250000
     groq_daily_token_budget: int = 100000
     groq_quality_reserve_tokens: int = 15000
+    candidate_builder_enabled: bool = True
+    candidate_builder_model: str = "llama-3.3-70b-versatile"
+    candidate_builder_job_token_budget: int = 12000
+    candidate_builder_max_output_tokens: int = 6000
+    candidate_builder_poll_seconds: float = 5.0
+    candidate_ci_attestation_token: str = ""
+    candidate_deploy_attestation_token: str = ""
     raw_telemetry_retention_days: int = 14
     workflow_retention_days: int = 90
     aggregate_retention_days: int = 365
@@ -68,6 +80,8 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = ""
     otel_exporter_otlp_headers: str = ""
     deployment_version: str = "local"
+    executor_version: str = ""
+    executor_role: str = "control"
     model_config = SettingsConfigDict(
         env_file=(".env", ".env.local"), extra="ignore"
     )

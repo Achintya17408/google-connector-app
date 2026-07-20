@@ -11,8 +11,14 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, StateGraph
 
 from app.agents.router import get_llm, get_model_name, route_model_node
+from app.agents.context_budget import fit_messages_to_budget
+from app.agents.errors import ModelContextLengthFailure, is_provider_context_length_error
 from app.agents.state import AgentState
-from app.mlops.metrics import llm_latency, tool_errors, tool_latency
+from app.mlops.metrics import (
+    llm_latency, model_context_preflight_compactions,
+    model_context_preflight_tokens, tool_errors, tool_latency,
+    tool_result_bytes_removed, tool_result_tokens,
+)
 from app.tools.base import (
     GoogleWorkspaceBaseTool,
     tool_run_id,
@@ -25,6 +31,8 @@ from app.rag.retriever import hybrid_retrieve
 from app.runs.planner import classify_request
 from app.okf.retriever import pack_operational_knowledge, retrieve_operational_knowledge
 from app.config.feature_flags import feature_enabled
+from app.config.settings import get_settings
+from app.tools.result_projection import project_tool_result
 
 SERVICES = ("gmail", "calendar", "drive", "docs", "sheets", "tasks", "chat", "contacts", "meet")
 ALIASES = {
@@ -72,7 +80,8 @@ def get_toolsets() -> dict[str, list[BaseTool]]:
     from app.tools import registry as tools
 
     return {
-        "gmail": [tools.search_gmail, tools.get_gmail_message, tools.send_gmail,
+        "gmail": [tools.search_gmail, tools.list_recent_gmail_senders,
+                  tools.get_gmail_message, tools.send_gmail,
                   tools.reply_gmail, tools.label_gmail, tools.trash_gmail,
                   tools.list_gmail_threads],
         "calendar": [tools.list_calendar_events, tools.get_calendar_event,
@@ -111,6 +120,7 @@ async def retrieve_context_node(state: AgentState):
             "rag_decision": {"mode": "none", "reason": "live or direct operation"},
         }
     started = time.perf_counter()
+    packing_strategy = "greedy"
     try:
         # Railway's small Ollama service can take over a minute to cold-start.
         # RAG is optional context, so never let a cold embedding model block chat.
@@ -123,6 +133,11 @@ async def retrieve_context_node(state: AgentState):
                 )
             else:
                 docs = []
+            packing_strategy = (
+                "dp" if await feature_enabled(
+                    pool, "dp_context_packing", state.get("user_id")
+                ) else "greedy"
+            )
     except Exception as exc:
         docs = []
         return {"retrieved_context": "", "operational_context": pack_operational_knowledge(operational),
@@ -145,10 +160,12 @@ async def retrieve_context_node(state: AgentState):
                 )
         except Exception:
             pass
-    return {"retrieved_context": pack_context(docs),
+    return {"retrieved_context": pack_context(docs, strategy=packing_strategy),
             "operational_context": pack_operational_knowledge(operational),
             "tool_results": docs,
-            "rag_decision": {"mode": policy["rag_mode"], "reason": "semantic historical request"}}
+            "rag_decision": {"mode": policy["rag_mode"],
+                             "reason": "semantic historical request",
+                             "packing_strategy": packing_strategy}}
 
 
 async def supervisor_node(state: AgentState):
@@ -254,7 +271,7 @@ async def _record_model_event(pool, state, event_type, model, fallback_model=Non
         )
 
 
-async def _execute_tool(tool: BaseTool, call: dict, state: AgentState, pool):
+async def execute_tool_call(tool: BaseTool, call: dict, state: AgentState, pool):
     started = time.perf_counter()
     context_token = tool_session_id.set(state.get("session_id"))
     user_token = tool_user_id.set(state.get("user_id"))
@@ -262,20 +279,30 @@ async def _execute_tool(tool: BaseTool, call: dict, state: AgentState, pool):
     step_token = tool_step_id.set(state.get("step_id"))
     try:
         result = await tool.ainvoke(call.get("args", {}))
+        envelope = project_tool_result(
+            tool.name, result,
+            max_tokens=get_settings().groq_tool_result_max_tokens,
+        )
+        tool_result_tokens.labels(tool.name, str(envelope.truncated).lower()).observe(
+            envelope.estimated_tokens
+        )
+        tool_result_bytes_removed.labels(tool.name).inc(
+            max(0, envelope.original_bytes - envelope.projected_bytes)
+        )
         elapsed = int((time.perf_counter() - started) * 1000)
         if not isinstance(tool, GoogleWorkspaceBaseTool):
             tool_latency.labels(tool.name).observe(elapsed / 1000)
         await _record_tool_call(
             pool, state.get("session_id"), tool.name, call.get("args", {}),
-            result, "success", elapsed, run_id=state.get("run_id"),
+            envelope.compact_result, "success", elapsed, run_id=state.get("run_id"),
             step_id=state.get("step_id"),
             legacy_log=not isinstance(tool, GoogleWorkspaceBaseTool),
         )
         return ToolMessage(
-            content=json.dumps(result, default=str),
+            content=json.dumps(envelope.compact_result, default=str),
             tool_call_id=call["id"],
             name=tool.name,
-        ), result
+        ), result, envelope
     except Exception as exc:
         elapsed = int((time.perf_counter() - started) * 1000)
         if not isinstance(tool, GoogleWorkspaceBaseTool):
@@ -292,7 +319,9 @@ async def _execute_tool(tool: BaseTool, call: dict, state: AgentState, pool):
             tool_call_id=call["id"],
             name=tool.name,
             status="error",
-        ), {"error": str(exc), "tool": tool.name}
+        ), {"error": str(exc), "tool": tool.name}, project_tool_result(
+            tool.name, {"error": str(exc), "tool": tool.name}, max_tokens=256,
+        )
     finally:
         tool_session_id.reset(context_token)
         tool_user_id.reset(user_token)
@@ -348,7 +377,20 @@ def make_service_node(service: str, pool=None):
                 for attempt in range(2):
                     llm_started = time.perf_counter()
                     try:
-                        response = await llm.ainvoke(messages)
+                        bounded_messages, context_report = fit_messages_to_budget(
+                            messages, available,
+                            context_limit=get_settings().groq_context_window_tokens,
+                            reserved_completion_tokens=get_settings().groq_max_tokens,
+                            safety_tokens=get_settings().groq_context_safety_tokens,
+                        )
+                        model_context_preflight_tokens.labels(used_model).observe(
+                            context_report.estimated_input_tokens
+                        )
+                        if context_report.compaction_count:
+                            model_context_preflight_compactions.labels(used_model).inc(
+                                context_report.compaction_count
+                            )
+                        response = await llm.ainvoke(bounded_messages)
                         llm_elapsed = int((time.perf_counter() - llm_started) * 1000)
                         llm_latency.labels(used_model).observe(llm_elapsed / 1000)
                         break
@@ -360,6 +402,19 @@ def make_service_node(service: str, pool=None):
                             status="error", error=str(exc),
                         )
                         error_text = str(exc).lower()
+                        if is_provider_context_length_error(exc):
+                            raise ModelContextLengthFailure(
+                                "The provider rejected the bounded executor context.",
+                                boundary=("post_tool_model_call" if executions else
+                                          "initial_model_call"),
+                                evidence={
+                                    "provider_error": str(exc)[:1000],
+                                    "context_report": (
+                                        context_report.as_dict()
+                                        if "context_report" in locals() else {}
+                                    ),
+                                },
+                            ) from exc
                         if any(value in error_text for value in ("rate_limit", "rate limit", "429")):
                             fallback_model = get_model_name(model_choice, fallback=True)
                             await _record_model_event(
@@ -377,7 +432,13 @@ def make_service_node(service: str, pool=None):
                             llm = get_llm(model_choice, fallback=True).bind_tools(available)
                             fallback_started = time.perf_counter()
                             try:
-                                response = await llm.ainvoke(messages)
+                                bounded_messages, context_report = fit_messages_to_budget(
+                                    messages, available,
+                                    context_limit=get_settings().groq_context_window_tokens,
+                                    reserved_completion_tokens=get_settings().groq_max_tokens,
+                                    safety_tokens=get_settings().groq_context_safety_tokens,
+                                )
+                                response = await llm.ainvoke(bounded_messages)
                             except Exception as fallback_exc:
                                 fallback_elapsed = int(
                                     (time.perf_counter() - fallback_started) * 1000
@@ -431,21 +492,36 @@ def make_service_node(service: str, pool=None):
                         )
                         result = {"error": "unknown tool", "tool": call["name"]}
                     else:
-                        message, result = await _execute_tool(tool, call, state, pool)
+                        message, result, envelope = await execute_tool_call(
+                            tool, call, state, pool,
+                        )
                     messages.append(message)
-                    results.append(result)
+                    compact_result = (
+                        envelope.compact_result if tool else result
+                    )
+                    results.append(compact_result)
                     executions.append({
                         "tool": call["name"],
                         "arguments": call.get("args", {}),
                         "result": result,
+                        "compact_result": compact_result,
+                        "projection": (envelope.metadata() if tool else {}),
                     })
             raise RuntimeError("Tool-call limit reached before the task completed")
         except Exception as exc:
-            return {
+            failure = {
                 "error": str(exc),
                 "output": f"I couldn't complete that request: {exc}",
                 "task_complete": False,
             }
+            if hasattr(exc, "category"):
+                failure.update({
+                    "error_category": exc.category,
+                    "error_component": getattr(exc, "component", None),
+                    "error_boundary": getattr(exc, "boundary", None),
+                    "error_evidence": getattr(exc, "evidence", {}),
+                })
+            return failure
 
     service_node.__name__ = f"{service}_agent"
     return service_node

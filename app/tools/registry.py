@@ -75,6 +75,75 @@ def search_gmail(query:str,max_results:int=10,after_date:str|None=None):
     q=f"{query} after:{after_date}" if after_date else query
     ids=g.gmail_service.users().messages().list(userId="me",q=q,maxResults=max_results).execute().get("messages",[])
     return [_gmail(g.gmail_service.users().messages().get(userId="me",id=x["id"],format="full").execute()) for x in ids]
+
+
+@tool(
+    "list_recent_gmail_senders",
+    description=(
+        "List recent Gmail senders using message metadata only. Use this instead of "
+        "search_gmail when the task needs sender names/addresses rather than bodies."
+    ),
+)
+def list_recent_gmail_senders(
+    max_results: int = 20,
+    query: str = "-in:sent",
+    unique: bool = True,
+    scan_limit: int = 200,
+):
+    requested = max(1, min(int(max_results), 100))
+    remaining = max(requested, min(int(scan_limit), 500))
+    senders = []
+    seen = set()
+    scanned = 0
+    page_token = None
+    while len(senders) < requested and scanned < remaining:
+        response = g.gmail_service.users().messages().list(
+            userId="me",
+            q=query,
+            maxResults=min(100, remaining - scanned),
+            pageToken=page_token,
+        ).execute()
+        message_ids = response.get("messages", [])
+        if not message_ids:
+            break
+        for item in message_ids:
+            if scanned >= remaining or len(senders) >= requested:
+                break
+            message = g.gmail_service.users().messages().get(
+                userId="me",
+                id=item["id"],
+                format="metadata",
+                metadataHeaders=["From", "Date"],
+                fields="id,threadId,payload/headers",
+            ).execute()
+            scanned += 1
+            headers = _headers(message)
+            sender_name, sender_email = parseaddr(headers.get("from", ""))
+            normalized = sender_email.strip().lower()
+            if not normalized or (unique and normalized in seen):
+                continue
+            seen.add(normalized)
+            try:
+                received = parsedate_to_datetime(headers.get("date", "")).isoformat()
+            except (TypeError, ValueError):
+                received = None
+            senders.append({
+                "message_id": message["id"],
+                "thread_id": message.get("threadId"),
+                "sender_name": sender_name.strip() or normalized,
+                "sender_email": normalized,
+                "received_at": received,
+            })
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return {
+        "senders": senders,
+        "requested": requested,
+        "returned": len(senders),
+        "unique": unique,
+        "scanned": scanned,
+    }
 @tool("get_gmail_message", description="Google Workspace operation")
 def get_gmail_message(message_id:str): return _gmail(g.gmail_service.users().messages().get(userId="me",id=message_id,format="full").execute())
 @tool("send_gmail", description="Google Workspace operation")
@@ -264,7 +333,7 @@ def list_meet_participants(conference_record: str, max_results: int = 100):
 
 
 _TOOL_NAMES = (
-    "search_gmail", "get_gmail_message", "send_gmail", "reply_gmail",
+    "search_gmail", "list_recent_gmail_senders", "get_gmail_message", "send_gmail", "reply_gmail",
     "label_gmail", "trash_gmail", "list_gmail_threads",
     "list_calendar_events", "get_calendar_event", "create_calendar_event",
     "update_calendar_event", "delete_calendar_event", "check_calendar_availability",

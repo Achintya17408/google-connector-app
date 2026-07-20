@@ -7,6 +7,7 @@ from app.config.settings import get_settings
 from app.runs.planner import action_hash, build_plan, validate_plan
 from app.mlops.metrics import approval_requests, run_transitions
 from app.improvements.failure_intelligence import record_failure_incident
+from app.improvements.routing import resolve_executor_assignment
 
 
 class RunLimitExceeded(RuntimeError):
@@ -58,16 +59,18 @@ async def create_run(pool, user_id, message, session_id, idempotency_key=None):
                     clarification_questions,intent_kind,intent_evidence,
                     planning_diagnostics,error_category,error_message,failed_at,
                     technical_completion,functional_completion,user_visible_completion,
-                    side_effect_integrity)
+                    side_effect_integrity,executor_version,cohort_assignment,
+                    assignment_reason,assigned_at)
                    VALUES($1,$2,$3,$3,'failed','validation',$4::jsonb,$5,FALSE,$6,$7,
                           $8,$9,$10,$11,$12::jsonb,$13,$14::jsonb,$15::jsonb,
-                          'planning',$16,now(),0,0,0,100) RETURNING *""",
+                          'planning',$16,now(),0,0,0,100,$17,'control',
+                          'planning failed before canary assignment',now()) RETURNING *""",
                 session_id, user_id, message, _json(plan.model_dump()),
                 policy["risk_level"], policy["approval_bypassed"], key,
                 "source-aware-v1", "v0.1", settings.deployment_version, retention,
                 _json(policy["required_clarifications"]), policy["intent_kind"],
                 _json(policy["intent_evidence"]), _json({"validation_errors": plan_errors}),
-                error,
+                error, settings.deployment_version,
             )
             await conn.execute(
                 """INSERT INTO agent_run_events
@@ -139,20 +142,27 @@ async def create_run(pool, user_id, message, session_id, idempotency_key=None):
                     "Quality-model token reserve is too low for a mutating workflow; "
                     "retry after quota resets or increase the configured budget"
                 )
+            assignment = await resolve_executor_assignment(
+                conn, user_id, settings.deployment_version,
+            )
             run = await conn.fetchrow(
                 """INSERT INTO agent_runs
                    (session_id,user_id,request,objective,status,current_phase,plan,
                     risk_level,requires_approval,approval_bypassed,idempotency_key,
                     chunker_version,okf_version,deployment_version,retention_until,
-                    clarification_questions,intent_kind,intent_evidence)
-                   VALUES($1,$2,$3,$3,$4,'planned',$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16::jsonb)
+                    clarification_questions,intent_kind,intent_evidence,executor_version,
+                    canary_id,cohort_assignment,assignment_reason,assigned_at,okf_bundle_version)
+                   VALUES($1,$2,$3,$3,$4,'planned',$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16::jsonb,
+                          $17,$18,$19,$20,now(),$21)
                    RETURNING *""",
                 session_id, user_id, message, status, _json(plan.model_dump()),
                 policy["risk_level"], policy["requires_approval"],
                 policy["approval_bypassed"], key, "source-aware-v1", "v0.1",
                 settings.deployment_version, retention,
                 _json(policy["required_clarifications"]), policy["intent_kind"],
-                _json(policy["intent_evidence"]),
+                _json(policy["intent_evidence"]), assignment.executor_version,
+                assignment.canary_id, assignment.cohort, assignment.reason,
+                assignment.okf_bundle_version,
             )
             run_id = run["id"]
             for sequence_no, step in enumerate(plan.steps, 1):

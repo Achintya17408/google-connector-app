@@ -56,6 +56,38 @@ failure_notifications = Gauge(
     "Failure intelligence notifications by channel and state",
     ["channel", "status"],
 )
+tool_result_tokens = Histogram(
+    "agent_tool_result_projected_tokens",
+    "Estimated tokens retained after deterministic tool-result projection",
+    ["tool_name", "truncated"],
+    buckets=(16, 32, 64, 128, 256, 512, 1024, 2000, 4000),
+)
+tool_result_bytes_removed = Counter(
+    "agent_tool_result_bytes_removed_total",
+    "Bytes removed before a tool result enters model or durable dependency context",
+    ["tool_name"],
+)
+model_context_preflight_tokens = Histogram(
+    "agent_model_context_preflight_tokens",
+    "Estimated input plus tool-schema tokens before provider calls",
+    ["model"],
+    buckets=(1000, 2000, 4000, 8000, 16000, 24000, 32000, 64000),
+)
+model_context_preflight_compactions = Counter(
+    "agent_model_context_preflight_compactions_total",
+    "Earlier tool payloads compacted before provider calls",
+    ["model"],
+)
+candidate_build_queue = Gauge(
+    "agent_candidate_builds", "Groq-only candidate builds by durable state", ["status"],
+)
+failure_theme_queue = Gauge(
+    "agent_failure_themes", "Cross-cluster architectural themes by state", ["status"],
+)
+canary_routing = Gauge(
+    "agent_canary_routing", "Governed canaries by routing and lifecycle state",
+    ["status", "routing_enabled"],
+)
 embedding_duration = Histogram(
     "agent_embedding_duration_seconds", "Ollama embedding latency", ["operation", "status"]
 )

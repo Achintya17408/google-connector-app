@@ -3,11 +3,14 @@ from contextlib import suppress
 
 from app.mlops.metrics import (
     artifact_cleanup_queue,
+    candidate_build_queue,
+    canary_routing,
     embedding_queue,
     improvement_queue,
     improvement_notifications,
     failure_notifications,
     failure_review_queue,
+    failure_theme_queue,
     rag_quality,
     rag_quality_samples,
     run_queue_depth,
@@ -29,6 +32,10 @@ CLEANUP_STATES = (
 )
 NOTIFICATION_CHANNELS = ("admin", "grafana", "email", "github")
 NOTIFICATION_STATES = ("queued", "sent", "skipped", "failed")
+CANDIDATE_BUILD_STATES = (
+    "queued", "investigating", "drafted", "validating", "validated", "failed", "cancelled",
+)
+FAILURE_THEME_STATES = ("active", "candidate_building", "resolved", "suppressed")
 
 
 async def collect_operational_metrics(pool):
@@ -44,6 +51,10 @@ async def collect_operational_metrics(pool):
         for state in NOTIFICATION_STATES:
             improvement_notifications.labels(channel, state).set(0)
             failure_notifications.labels(channel, state).set(0)
+    for state in CANDIDATE_BUILD_STATES:
+        candidate_build_queue.labels(state).set(0)
+    for state in FAILURE_THEME_STATES:
+        failure_theme_queue.labels(state).set(0)
     for stage in ("intake", "classification", "planning", "validation", "admission",
                   "approval", "execution", "verification", "recovery", "persistence", "api"):
         for risk in ("low", "medium", "high"):
@@ -83,6 +94,21 @@ async def collect_operational_metrics(pool):
                GROUP BY channel,status"""
         ):
             failure_notifications.labels(row["channel"], row["status"]).set(row["count"])
+        for row in await conn.fetch(
+            "SELECT status,count(*) AS count FROM candidate_builds GROUP BY status"
+        ):
+            candidate_build_queue.labels(row["status"]).set(row["count"])
+        for row in await conn.fetch(
+            "SELECT status,count(*) AS count FROM failure_themes GROUP BY status"
+        ):
+            failure_theme_queue.labels(row["status"]).set(row["count"])
+        for row in await conn.fetch(
+            """SELECT status,routing_enabled,count(*) AS count
+               FROM improvement_canaries GROUP BY status,routing_enabled"""
+        ):
+            canary_routing.labels(
+                row["status"], str(row["routing_enabled"]).lower()
+            ).set(row["count"])
         quality = await conn.fetchrow(
             """SELECT avg(faithfulness) AS faithfulness,
                       avg(answer_relevancy) AS answer_relevancy,

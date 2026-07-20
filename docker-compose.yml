@@ -45,8 +45,24 @@ services:
       EMBEDDED_WORKER_ENABLED: "false"
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-local-development-only-secret-32-bytes}
       OTEL_SERVICE_NAME: google-connector-worker
+      EXECUTOR_ROLE: control
     depends_on:
       api:
+        condition: service_healthy
+  candidate-builder:
+    profiles: ["improvements"]
+    build: .
+    command: ["python", "-m", "app.improvements.builder_entry"]
+    environment:
+      DATABASE_URL: postgresql://agent_user:agent_pass_2024@postgres:5432/agent_db
+      ASYNC_DATABASE_URL: postgresql+asyncpg://agent_user:agent_pass_2024@postgres:5432/agent_db
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_FAST_MODEL: ${GROQ_FAST_MODEL:-llama-3.3-70b-versatile}
+      CANDIDATE_BUILDER_MODEL: ${CANDIDATE_BUILDER_MODEL:-llama-3.3-70b-versatile}
+      DEPLOYMENT_VERSION: ${DEPLOYMENT_VERSION:-local}
+      CANDIDATE_BUILDER_ENABLED: "true"
+    depends_on:
+      postgres:
         condition: service_healthy
   ollama:
     image: ollama/ollama

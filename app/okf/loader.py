@@ -170,6 +170,18 @@ async def sync_bundle(pool, root: Path | None = None):
             documents.extend(private_documents)
     if errors:
         raise ValueError("Invalid OKF bundle:\n" + "\n".join(errors))
+    trusted_documents = [document for document in documents if document["trusted"]]
+    manifest = {
+        "okf_version": "0.1",
+        "documents": [
+            {"id": item["id"], "content_hash": item["content_hash"],
+             "version": item["version"], "visibility": item["visibility"]}
+            for item in sorted(trusted_documents, key=lambda value: value["id"])
+        ],
+    }
+    bundle_hash = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     async with pool.acquire() as conn:
         async with conn.transaction():
             # Older builds incorrectly stored the reserved root index as a
@@ -206,6 +218,41 @@ async def sync_bundle(pool, root: Path | None = None):
                             chunker_version,metadata)
                            VALUES($1,$2,$3,$4,$5,'okf-structure-v1',$6::jsonb)""",
                         document["id"], chunk["heading"], chunk["chunk_index"],
+                        chunk["content"], chunk["content_hash"],
+                        json.dumps({"concept_type": document["concept_type"],
+                                    "tags": document["tags"]}),
+                    )
+            await conn.execute(
+                """INSERT INTO okf_bundle_versions
+                   (bundle_hash,source_version,publication_status,manifest,
+                    validation_report,privacy_report,security_report,approved_by,approved_at)
+                   VALUES($1,'repository','trusted',$2::jsonb,
+                          '{"passed":true,"validator":"okf-loader-v1"}'::jsonb,
+                          '{"pii_scan":"passed"}'::jsonb,
+                          '{"secret_scan":"passed"}'::jsonb,'repository-governance',now())
+                   ON CONFLICT(bundle_hash) DO NOTHING""",
+                bundle_hash, json.dumps(manifest),
+            )
+            for document in trusted_documents:
+                await conn.execute(
+                    """INSERT INTO okf_bundle_documents
+                       (bundle_hash,document_id,visibility,concept_type,title,version,
+                        content,content_hash,metadata)
+                       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+                       ON CONFLICT(bundle_hash,document_id) DO NOTHING""",
+                    bundle_hash, document["id"], document["visibility"],
+                    document["concept_type"], document["title"], document["version"],
+                    document["content"], document["content_hash"],
+                    json.dumps(document["metadata"], default=str),
+                )
+                for chunk in section_chunks(document):
+                    await conn.execute(
+                        """INSERT INTO okf_bundle_chunks
+                           (bundle_hash,document_id,chunk_index,heading,content,
+                            content_hash,metadata)
+                           VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
+                           ON CONFLICT(bundle_hash,document_id,chunk_index) DO NOTHING""",
+                        bundle_hash, document["id"], chunk["chunk_index"], chunk["heading"],
                         chunk["content"], chunk["content_hash"],
                         json.dumps({"concept_type": document["concept_type"],
                                     "tags": document["tags"]}),

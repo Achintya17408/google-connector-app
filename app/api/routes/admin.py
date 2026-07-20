@@ -10,6 +10,9 @@ from app.db.prompt_service import (
 )
 from app.runs.schemas import (
     ImprovementCandidateRegistration,
+    CandidateValidationAttestation,
+    CandidateDeploymentAttestation,
+    CanaryActivationDecision,
     ImprovementDecision,
     ImprovementDeploymentEvidence,
 )
@@ -17,7 +20,10 @@ from app.runs.repository import search_runs
 from app.config.settings import get_settings
 from app.db.google_clients import request_google_credentials
 from app.db.oauth_credentials import load_google_credentials
-from app.improvements.publisher import publish_github_draft, send_proposal_email
+from app.improvements.publisher import (
+    dispatch_candidate_deployment, publish_github_draft, send_proposal_email,
+    promote_candidate_pr,
+)
 from app.improvements.candidates import (
     candidate_digest, file_digest, validate_candidate_files,
 )
@@ -42,6 +48,90 @@ class FeatureFlagIn(BaseModel):
 class FailureIncidentDecisionIn(BaseModel):
     decision: str
     note: str | None = Field(default=None, max_length=4000)
+
+
+@router.get("/candidate-builds")
+async def candidate_builds(status: str | None = None, limit: int = 100):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT b.*,p.proposal_key,p.title FROM candidate_builds b
+               JOIN improvement_proposals p ON p.id=b.proposal_id
+               WHERE ($1::text IS NULL OR b.status=$1)
+               ORDER BY b.created_at DESC LIMIT $2""",
+            status, max(1, min(limit, 200)),
+        )
+    return {"builds": [dict(row) for row in rows]}
+
+
+@router.post("/candidate-builds/{build_id}/attestation")
+async def attest_candidate_build(build_id: str, body: CandidateValidationAttestation):
+    settings = get_settings()
+    if body.repository != settings.github_proposal_repository:
+        raise HTTPException(409, "CI repository does not match the configured repository")
+    if not body.passed:
+        raise HTTPException(422, "A passing trusted CI result is required")
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        build = await conn.fetchrow(
+            """SELECT b.*,p.candidate_kind,p.candidate_version,p.exact_diff,
+                      p.rollback_plan,p.validation_report
+               FROM candidate_builds b JOIN improvement_proposals p ON p.id=b.proposal_id
+               WHERE b.id=$1 FOR UPDATE""", build_id,
+        )
+        if not build or build["status"] != "drafted":
+            raise HTTPException(409, "Candidate build is not awaiting trusted CI")
+        files = [dict(row) for row in await conn.fetch(
+            """SELECT path,change_type,content,result_hash FROM candidate_build_files
+               WHERE build_id=$1 ORDER BY path""", build_id,
+        )]
+        expected = {item["path"]: item["result_hash"] for item in files}
+        if body.file_hashes != expected:
+            raise HTTPException(409, "CI file hashes do not match the frozen candidate")
+        report = {
+            "passed": True, "commands": body.commands, "results": body.results,
+            "suite_version": body.suite_version, "commit_sha": body.commit_sha,
+            "tree_sha": body.tree_sha, "workflow": body.workflow,
+            "run_id": body.run_id, "log_digest": body.log_digest,
+            "trusted_identity": f"github-actions:{body.repository}:{body.workflow}",
+        }
+        digest_files = [
+            {"path": item["path"], "change_type": item["change_type"],
+             "content": item["content"]} for item in files
+        ]
+        digest = candidate_digest(
+            build["base_commit"], digest_files, report,
+            candidate_kind=build["candidate_kind"],
+            candidate_version=body.commit_sha, exact_diff=build["exact_diff"],
+            rollback_plan=build["rollback_plan"],
+        )
+        await conn.execute(
+            """INSERT INTO candidate_validation_runs
+               (build_id,suite_version,commit_sha,status,commands,results,log_digest,
+                attestation,trusted_identity,completed_at)
+               VALUES($1,$2,$3,'passed',$4::jsonb,$5::jsonb,$6,$7::jsonb,$8,now())""",
+            build_id, body.suite_version, body.commit_sha, json.dumps(body.commands),
+            json.dumps(body.results), body.log_digest, json.dumps(body.model_dump()),
+            report["trusted_identity"],
+        )
+        await conn.execute(
+            """UPDATE candidate_builds SET status='validated',candidate_commit=$1,
+               candidate_tree=$2,canonical_digest=$3,checkpoint=checkpoint||$4::jsonb,
+               updated_at=now(),completed_at=now() WHERE id=$5""",
+            body.commit_sha, body.tree_sha, digest,
+            json.dumps({"trusted_ci": report}), build_id,
+        )
+        await conn.execute(
+            """UPDATE improvement_proposals SET candidate_state='validated_implementation',
+               candidate_version=$1,validation_report=$2::jsonb,content_hash=$3,
+               candidate_manifest=candidate_manifest||$4::jsonb,updated_at=now()
+               WHERE id=$5""",
+            body.commit_sha, json.dumps(report), digest,
+            json.dumps({"candidate_commit": body.commit_sha,
+                        "candidate_tree": body.tree_sha,"canary_eligible": True}),
+            build["proposal_id"],
+        )
+    return {"build_id": build_id, "status": "validated", "content_hash": digest}
 
 
 @router.get("/runs")
@@ -179,7 +269,10 @@ async def decide_failure_incident(
 
 
 @router.get("/improvements")
-async def improvements(status: str | None = None):
+async def improvements(status: str | None = None, view: str = "active", limit: int = 100):
+    if view not in {"active", "history", "all"}:
+        raise HTTPException(422, "view must be active, history, or all")
+    terminal = ("rejected", "expired", "rolled_back", "approved_for_publication", "published")
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -190,11 +283,34 @@ async def improvements(status: str | None = None):
                  WHERE proposal_id=p.id ORDER BY started_at DESC NULLS LAST LIMIT 1
                ) c ON TRUE
                WHERE ($1::text IS NULL OR p.status=$1)
+                 AND ($2='all' OR ($2='active' AND NOT p.status=ANY($3::text[]))
+                      OR ($2='history' AND p.status=ANY($3::text[])))
                ORDER BY CASE p.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,
-                        p.created_at DESC""",
-            status,
+                        p.created_at DESC LIMIT $4""",
+            status, view, terminal, max(1, min(limit, 200)),
         )
     return {"proposals": [dict(row) for row in rows]}
+
+
+@router.get("/failure-themes")
+async def failure_themes(status: str | None = "active", limit: int = 100):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT t.*,
+                      coalesce(jsonb_agg(jsonb_build_object(
+                        'cluster_key',c.cluster_key,'title',c.title,
+                        'occurrence_count',c.occurrence_count,'category',c.category
+                      ) ORDER BY c.last_seen DESC) FILTER(WHERE c.cluster_key IS NOT NULL),'[]')
+                        AS clusters
+               FROM failure_themes t
+               LEFT JOIN failure_theme_clusters tc ON tc.theme_id=t.id
+               LEFT JOIN failure_clusters c ON c.cluster_key=tc.cluster_key
+               WHERE ($1::text IS NULL OR t.status=$1)
+               GROUP BY t.id ORDER BY t.last_seen DESC LIMIT $2""",
+            status, max(1, min(limit, 200)),
+        )
+    return {"themes": [dict(row) for row in rows]}
 
 
 @router.put("/improvements/{proposal_key}/candidate")
@@ -209,7 +325,13 @@ async def register_improvement_candidate(
         errors.append("Validation report must list the commands that were run")
     if errors:
         raise HTTPException(422, errors)
-    digest = candidate_digest(body.base_version, files, body.validation_report)
+    digest = candidate_digest(
+        body.base_version, files, body.validation_report,
+        candidate_kind=body.candidate_kind,
+        candidate_version=body.candidate_version,
+        exact_diff=body.exact_diff,
+        rollback_plan=body.rollback_plan,
+    )
     manifest = {
         "file_count": len(files), "candidate_digest": digest,
         "registered_by": request.state.user_id,
@@ -259,6 +381,12 @@ async def register_candidate_deployment(
         )
         if not proposal or proposal["candidate_state"] != "validated_implementation":
             raise HTTPException(409, "A validated implementation candidate is required")
+        if proposal["candidate_kind"] == "code":
+            raise HTTPException(
+                409,
+                "Code deployment evidence must come from the trusted isolated deployment "
+                "controller; an administrator assertion cannot activate a code canary",
+            )
         if proposal["candidate_version"] != body.candidate_version:
             raise HTTPException(409, "Deployment version does not match the frozen candidate")
         if not body.verified or body.smoke_tests.get("passed") is not True:
@@ -267,6 +395,65 @@ async def register_candidate_deployment(
         await conn.execute(
             "UPDATE improvement_proposals SET deployment_evidence=$1::jsonb,updated_at=now() WHERE id=$2",
             json.dumps(evidence), proposal["id"],
+        )
+    return {"proposal_key": proposal_key, "deployment_verified": True}
+
+
+@router.post("/improvements/{proposal_key}/deployment-attestation")
+async def attest_candidate_deployment(
+    proposal_key: str, body: CandidateDeploymentAttestation,
+):
+    settings = get_settings()
+    if not settings.railway_project_id:
+        raise HTTPException(503, "RAILWAY_PROJECT_ID is not configured")
+    if body.project_id != settings.railway_project_id:
+        raise HTTPException(409, "Deployment project does not match the governed project")
+    if body.service_name != settings.railway_candidate_worker_service:
+        raise HTTPException(409, "Deployment must target the isolated candidate worker")
+    if not body.verified or body.smoke_tests.get("passed") is not True:
+        raise HTTPException(422, "Verified isolated deployment and smoke tests are required")
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        proposal = await conn.fetchrow(
+            "SELECT * FROM improvement_proposals WHERE proposal_key=$1 FOR UPDATE",
+            proposal_key,
+        )
+        if not proposal or proposal["status"] != "approved_for_canary":
+            raise HTTPException(409, "Candidate must have human canary approval")
+        if proposal["candidate_version"] != body.candidate_version:
+            raise HTTPException(409, "Deployment commit does not match the frozen candidate")
+        candidate_paths = await conn.fetch(
+            "SELECT path FROM improvement_candidate_files WHERE proposal_id=$1",
+            proposal["id"],
+        )
+        api_planning_paths = {
+            "app/runs/planner.py", "app/runs/repository.py", "app/api/routes/runs.py",
+        }
+        incompatible = sorted(
+            row["path"] for row in candidate_paths if row["path"] in api_planning_paths
+        )
+        if incompatible:
+            raise HTTPException(
+                409,
+                "This candidate changes pre-worker planning and cannot be isolated by the "
+                f"worker-only canary target: {', '.join(incompatible)}",
+            )
+        evidence = {
+            **body.model_dump(),
+            "trusted_identity": f"github-actions:{settings.github_proposal_repository}:{body.workflow}",
+        }
+        await conn.execute(
+            """UPDATE improvement_proposals SET deployment_evidence=$1::jsonb,
+               candidate_manifest=candidate_manifest||$2::jsonb,updated_at=now()
+               WHERE id=$3""",
+            json.dumps(evidence), json.dumps({"candidate_deployment": evidence}),
+            proposal["id"],
+        )
+        await conn.execute(
+            """UPDATE improvement_canaries SET candidate_deployment_id=$1
+               WHERE id=(SELECT id FROM improvement_canaries WHERE proposal_id=$2
+                         AND status='pending' ORDER BY id DESC LIMIT 1)""",
+            body.deployment_id, proposal["id"],
         )
     return {"proposal_key": proposal_key, "deployment_verified": True}
 
@@ -361,18 +548,24 @@ async def publish_proposal_draft(
         raise HTTPException(409, "Exact draft-PR confirmation is required")
     pool, proposal, notification = await _reserve_external_notification(
         proposal_key, body.proposal_hash, "github", "draft_pr_created",
-        "approved_for_publication",
+        "awaiting_review",
     )
     if notification["status"] == "sent":
         return {"status": "sent", "url": notification["external_reference"]}
     try:
         async with pool.acquire() as conn:
             candidate_files = [dict(row) for row in await conn.fetch(
-                "SELECT path,change_type,content FROM improvement_candidate_files WHERE proposal_id=$1 ORDER BY path",
+                "SELECT path,change_type,content,content_hash FROM improvement_candidate_files WHERE proposal_id=$1 ORDER BY path",
                 proposal["id"],
             )]
         result = await publish_github_draft(proposal, candidate_files)
         await _finish_notification(pool, notification["id"], reference=result["url"])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE improvement_proposals SET candidate_manifest=
+                   candidate_manifest||$1::jsonb,updated_at=now() WHERE id=$2""",
+                json.dumps({"draft_pr": result}), proposal["id"],
+            )
         return {"status": "sent", **result}
     except Exception as exc:
         await _finish_notification(pool, notification["id"], error=str(exc))
@@ -455,6 +648,11 @@ async def decide_canary(proposal_key: str, body: ImprovementDecision, request: R
                     409,
                     "This is a diagnosis-only finding. Attach concrete files and passing validation evidence before canary approval.",
                 )
+            validation = proposal["validation_report"] or {}
+            if body.decision == "approved" and not validation.get("trusted_identity"):
+                raise HTTPException(
+                    409, "A trusted CI attestation bound to the candidate commit is required",
+                )
             if body.decision == "changes_requested" and not (body.note or "").strip():
                 raise HTTPException(422, "A change-request note is required")
             await conn.execute(
@@ -481,11 +679,32 @@ async def decide_canary(proposal_key: str, body: ImprovementDecision, request: R
                     proposal["source_version"] or "current",
                     proposal["candidate_version"] or proposal["content_hash"][:12],
                 )
-    return {"proposal_key": proposal_key, "status": next_status}
+    deployment_dispatch = None
+    if body.decision == "approved":
+        try:
+            if get_settings().allow_dev_auth:
+                deployment_dispatch = {"status": "skipped_in_development"}
+            else:
+                deployment_dispatch = await dispatch_candidate_deployment(dict(proposal))
+        except Exception as exc:
+            deployment_dispatch = {"status": "not_dispatched", "reason": str(exc)}
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO improvement_notifications
+                       (proposal_id,channel,event_type,status,sanitized_payload,error_message)
+                       VALUES($1,'github','candidate_deployment_dispatch','failed',$2::jsonb,$3)
+                       ON CONFLICT(proposal_id,channel,event_type) DO UPDATE SET
+                         status='failed',error_message=excluded.error_message,created_at=now()""",
+                    proposal["id"], json.dumps({
+                        "proposal_key": proposal_key, "contains_private_evidence": False,
+                    }), str(exc),
+                )
+    return {"proposal_key": proposal_key, "status": next_status,
+            "deployment_dispatch": deployment_dispatch}
 
 
 @router.post("/improvements/{proposal_key}/activate-canary")
-async def activate_canary(proposal_key: str, body: ImprovementDecision,
+async def activate_canary(proposal_key: str, body: CanaryActivationDecision,
                           request: Request):
     if body.decision != "approved":
         raise HTTPException(422, "Canary activation requires an approved decision")
@@ -502,12 +721,21 @@ async def activate_canary(proposal_key: str, body: ImprovementDecision,
         evidence = proposal["deployment_evidence"] or {}
         if evidence.get("verified") is not True or evidence.get("candidate_version") != proposal["candidate_version"]:
             raise HTTPException(409, "Verified deployment evidence for the frozen candidate is required")
+        if proposal["candidate_kind"] == "code" and not evidence.get("trusted_identity"):
+            raise HTTPException(
+                409, "Code canaries require deployment evidence from the trusted controller",
+            )
         updated = await conn.fetchval(
-            """UPDATE improvement_canaries SET status='active',started_at=now()
+            """UPDATE improvement_canaries SET status='active',started_at=now(),
+               routing_enabled=TRUE,traffic_percent=$2,allowed_users=$3,
+               denied_users=$4,activated_by=$5
                WHERE id=(SELECT id FROM improvement_canaries WHERE proposal_id=$1
                          AND status='pending' ORDER BY id DESC LIMIT 1)
                RETURNING id""",
-            proposal["id"],
+            proposal["id"], body.traffic_percent,
+            [item.strip().lower() for item in body.allowed_users if item.strip()],
+            [item.strip().lower() for item in body.denied_users if item.strip()],
+            request.state.user_id,
         )
         if not updated:
             raise HTTPException(409, "Pending canary record not found")
@@ -555,4 +783,19 @@ async def decide_promotion(proposal_key: str, body: ImprovementDecision,
                 "UPDATE improvement_proposals SET status=$1,updated_at=now() WHERE id=$2",
                 next_status, proposal["id"],
             )
-    return {"proposal_key": proposal_key, "status": next_status}
+    publication = None
+    if body.decision == "approved":
+        try:
+            publication = await promote_candidate_pr(dict(proposal))
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE improvement_proposals SET status='published',
+                       candidate_manifest=candidate_manifest||$1::jsonb,updated_at=now()
+                       WHERE id=$2""",
+                    json.dumps({"production_merge": publication}), proposal["id"],
+                )
+            next_status = "published"
+        except Exception as exc:
+            publication = {"status": "not_published", "reason": str(exc)}
+    return {"proposal_key": proposal_key, "status": next_status,
+            "publication": publication}

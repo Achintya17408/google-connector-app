@@ -1,0 +1,230 @@
+"""Groq-only, no-execution candidate generation with durable checkpoints."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+from pathlib import Path
+
+from groq import AsyncGroq
+
+from app.config.settings import get_settings
+from app.improvements.candidates import (
+    candidate_digest, file_digest, validate_candidate_files,
+)
+
+logger = logging.getLogger(__name__)
+ROOT = Path(__file__).resolve().parents[2]
+MODEL_POLICY_VERSION = "adaptive-roles-v1"
+TOOL_POLICY_VERSION = "bounded-repo-tools-v1"
+
+COMPONENT_PATHS = {
+    "typed_planner": ["app/runs/planner.py", "tests/unit/test_core.py"],
+    "request_planner": ["app/runs/planner.py", "app/runs/repository.py", "tests/unit/test_core.py"],
+    "executor_context_builder": [
+        "app/agents/supervisor.py", "app/agents/context_budget.py",
+        "app/tools/result_projection.py", "tests/unit/test_core.py",
+    ],
+    "durable_worker": ["app/runs/worker.py", "tests/unit/test_core.py"],
+    "step_executor": ["app/runs/worker.py", "app/agents/supervisor.py", "tests/unit/test_core.py"],
+}
+
+
+def choose_builder_mode(risk_level: str, change_scope: list[str]) -> str:
+    return "multi_role" if risk_level in {"high", "critical"} or len(change_scope) > 3 else "single"
+
+
+def _bounded_sources(component: str, change_scope: list[str]) -> list[dict]:
+    paths = list(COMPONENT_PATHS.get(component, []))
+    for scope in change_scope:
+        normalized = scope.strip().replace(" ", "_")
+        candidate = f"app/{normalized}.py"
+        if (ROOT / candidate).is_file():
+            paths.append(candidate)
+    output = []
+    total = 0
+    for path in dict.fromkeys(paths):
+        content = (ROOT / path).read_text()
+        if total + len(content) > 120_000:
+            continue
+        output.append({"path": path, "content": content})
+        total += len(content)
+    return output
+
+
+async def enqueue_candidate_build(pool, proposal_id, incident: dict, option: dict, actor: str):
+    settings = get_settings()
+    if not settings.candidate_builder_enabled:
+        return None
+    scope = option.get("change_scope") or []
+    mode = choose_builder_mode(incident.get("risk_level", "medium"), scope)
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """INSERT INTO candidate_builds
+               (proposal_id,selected_option,mode,base_commit,model_name,
+                model_policy_version,tool_policy_version,token_budget,sanitized_input,
+                created_by)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10) RETURNING id""",
+            proposal_id, option["id"], mode, get_settings().deployment_version,
+            settings.candidate_builder_model, MODEL_POLICY_VERSION, TOOL_POLICY_VERSION,
+            settings.candidate_builder_job_token_budget,
+            json.dumps({
+                "incident_id": str(incident["id"]), "title": incident["title"],
+                "stage": incident["stage"], "category": incident["category"],
+                "component": incident["component"], "service": incident["service"],
+                "operation": incident["operation"], "root_cause": incident["root_cause"],
+                "selected_option": option, "contains_raw_user_content": False,
+            }), actor,
+        )
+
+
+def _candidate_prompt(job: dict, sources: list[dict], role: str) -> str:
+    return json.dumps({
+        "role": role,
+        "objective": (
+            "Produce a minimal implementation candidate and regression tests. Return JSON only "
+            "with files[{path,change_type,content}], exact_diff, rollback_plan, validation_commands, notes."
+        ),
+        "rules": [
+            "Use only supplied repository paths or create files under app/, tests/, knowledge/, config/, docs/.",
+            "Never include secrets, credentials, raw user content, shell commands, network calls, or production mutations.",
+            "Do not claim tests passed. CI validates the frozen candidate separately.",
+            "Preserve unrelated behavior and include a no-network regression for the reported failure.",
+        ],
+        "incident": job["sanitized_input"], "sources": sources,
+    }, default=str)
+
+
+async def _groq_json(job: dict, sources: list[dict], role: str) -> tuple[dict, int]:
+    settings = get_settings()
+    client = AsyncGroq(api_key=settings.groq_api_key)
+    response = await client.chat.completions.create(
+        model=job["model_name"],
+        messages=[{"role": "user", "content": _candidate_prompt(job, sources, role)}],
+        temperature=0.1,
+        max_tokens=min(settings.candidate_builder_max_output_tokens, job["token_budget"]),
+        response_format={"type": "json_object"},
+    )
+    data = json.loads(response.choices[0].message.content)
+    usage = response.usage
+    return data, int((usage.prompt_tokens or 0) + (usage.completion_tokens or 0))
+
+
+async def process_one_candidate_build(pool) -> bool:
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """SELECT b.*,p.proposal_key,p.risk_level FROM candidate_builds b
+               JOIN improvement_proposals p ON p.id=b.proposal_id
+               WHERE b.status='queued' ORDER BY b.created_at
+               FOR UPDATE SKIP LOCKED LIMIT 1"""
+        )
+        if not row:
+            return False
+        await conn.execute(
+            "UPDATE candidate_builds SET status='investigating',updated_at=now() WHERE id=$1",
+            row["id"],
+        )
+    job = dict(row)
+    sanitized = dict(job["sanitized_input"] or {})
+    sources = _bounded_sources(sanitized.get("component", ""),
+                               sanitized.get("selected_option", {}).get("change_scope", []))
+    try:
+        roles = ["coordinator"] if job["mode"] == "single" else [
+            "investigator_and_patch_author", "independent_safety_reviewer",
+        ]
+        candidate = None
+        tokens = 0
+        for role in roles:
+            if tokens >= job["token_budget"]:
+                raise RuntimeError("Candidate token budget exhausted before review")
+            output, used = await _groq_json(job, sources if candidate is None else [
+                {"candidate_for_review": candidate}
+            ], role)
+            tokens += used
+            if role == "independent_safety_reviewer":
+                if output.get("approved") is False:
+                    raise RuntimeError(output.get("reason") or "Independent review rejected candidate")
+                candidate = output.get("revised_candidate") or candidate
+            else:
+                candidate = output
+        files = candidate.get("files") or []
+        errors = validate_candidate_files(files)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        exact_diff = candidate.get("exact_diff") or "generated files are the authoritative candidate"
+        rollback = candidate.get("rollback_plan") or {"action": "route traffic to base version"}
+        validation = {
+            "passed": False, "status": "awaiting_trusted_ci",
+            "commands": candidate.get("validation_commands") or [],
+            "builder_did_not_execute_code": True,
+        }
+        digest = candidate_digest(
+            job["base_commit"], files, validation,
+            candidate_kind="code", candidate_version=f"build-{job['id']}",
+            exact_diff=exact_diff, rollback_plan=rollback,
+        )
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "DELETE FROM improvement_candidate_files WHERE proposal_id=$1",
+                job["proposal_id"],
+            )
+            for item in files:
+                preimage = (ROOT / item["path"]).read_text() if (ROOT / item["path"]).is_file() else None
+                await conn.execute(
+                    """INSERT INTO candidate_build_files
+                       (build_id,path,change_type,preimage_hash,result_hash,content)
+                       VALUES($1,$2,$3,$4,$5,$6)""",
+                    job["id"], item["path"], item["change_type"],
+                    file_digest(preimage) if preimage is not None else None,
+                    file_digest(item.get("content")), item.get("content"),
+                )
+                await conn.execute(
+                    """INSERT INTO improvement_candidate_files
+                       (proposal_id,path,change_type,content,content_hash)
+                       VALUES($1,$2,$3,$4,$5)""",
+                    job["proposal_id"], item["path"], item["change_type"],
+                    item.get("content"), file_digest(item.get("content")),
+                )
+            await conn.execute(
+                """UPDATE candidate_builds SET status='drafted',tokens_used=$1,
+                   canonical_digest=$2,checkpoint=$3::jsonb,updated_at=now() WHERE id=$4""",
+                tokens, digest, json.dumps({"roles_completed": roles}), job["id"],
+            )
+            await conn.execute(
+                """UPDATE improvement_proposals SET candidate_kind='code',
+                   candidate_state='implementation_draft',candidate_version=$1,
+                   exact_diff=$2,rollback_plan=$3::jsonb,validation_report=$4::jsonb,
+                   candidate_manifest=$5::jsonb,content_hash=$6,updated_at=now()
+                   WHERE id=$7""",
+                f"build-{job['id']}", exact_diff, json.dumps(rollback),
+                json.dumps(validation), json.dumps({
+                    "build_id": str(job["id"]), "mode": job["mode"],
+                    "model": job["model_name"], "tool_policy": TOOL_POLICY_VERSION,
+                    "canary_eligible": False,
+                }), digest, job["proposal_id"],
+            )
+        return True
+    except Exception as exc:
+        logger.exception("Candidate build %s failed", job["id"])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE candidate_builds SET status='failed',error_message=$1,
+                   updated_at=now(),completed_at=now() WHERE id=$2""",
+                str(exc)[:2000], job["id"],
+            )
+        return True
+
+
+async def candidate_builder_loop(pool, stop_event: asyncio.Event):
+    while not stop_event.is_set():
+        worked = await process_one_candidate_build(pool)
+        if worked:
+            continue
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=get_settings().candidate_builder_poll_seconds,
+            )
+        except asyncio.TimeoutError:
+            pass

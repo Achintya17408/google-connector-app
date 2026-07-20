@@ -112,6 +112,24 @@ DETECTED -> ANALYZING -> DRAFTED -> SANITIZED -> EVALUATED
 - Organize under `Google Connector/Production` and `Google Connector/Local`.
 - Do not commit credentials or owner connection details.
 
+### 3.6 Groq-only candidate engineering
+
+- Automated implementation candidates use only the configured Groq API/model family;
+  they must not require an OpenAI, DeepSeek, or other coding-model credential.
+- A single Groq coordinator handles small, localized candidates. It may escalate to
+  separate investigator, patch-author, test-author, and reviewer roles when the
+  reproduction, risk, or changed-file scope justifies the additional token cost.
+- Deterministic sandbox tools perform repository search/read, patch application,
+  allowlisted validation, diff inspection, hashing, and rollback. The LLM proposes
+  bounded tool calls but receives no production OAuth token, production database
+  credential, deployment credential, or raw private Workspace payload.
+- A tool-extension role may propose a new registered tool, schema, adapter, tests, and
+  OKF documentation as an ordinary code candidate. It cannot dynamically add trusted
+  runtime authority, OAuth scopes, or external-write permission.
+- Automatic diagnosis, reproduction, candidate drafting, tests, and evidence assembly
+  do not approve themselves. Human candidate, canary, trusted OKF, high-risk external
+  publication, and production-promotion gates remain mandatory.
+
 ## 4. Sprint implementation ledger
 
 Legend: `[ ]` pending, `[~]` active, `[x]` complete, `[!]` externally blocked.
@@ -428,6 +446,217 @@ Guardrail: a diagnosis-only proposal cannot create or activate a canary; an info
 - [~] Preserve rollback through the existing deployment path; local migration round-trip, Docker, API/worker, Prometheus, Grafana, PostgreSQL, and frontend gates pass. GitHub CI and Railway/Vercel/Neon/Grafana Cloud production rollout follow the draft PR.
 
 Guardrail: every accepted request has a durable outcome or a separately durable intake incident; every failure occurrence is reviewable, but no diagnosis can approve or deploy itself.
+
+## Sprint 28 — Bounded live-tool results and deterministic structured operations
+
+### Epic 28.1 — Metadata-only Gmail sender extraction
+
+- [ ] Add an explicitly registered `list_recent_gmail_senders` operation that lists
+  recent message IDs, fetches only required metadata headers, parses names/addresses,
+  supports ordered unique/non-unique semantics, and returns a compact bounded schema.
+- [ ] Route requests such as “last 20 people who mailed me” to this operation without
+  reading bodies/HTML, invoking RAG, or asking an LLM to extract deterministic fields.
+- [ ] Preserve message IDs/date provenance and verify count, order, non-empty names,
+  duplicate policy, authorization, and dependency output for downstream Sheets.
+
+### Epic 28.2 — Universal result envelopes and approved projection
+
+- [ ] Introduce typed result envelopes carrying compact output, tenant-scoped full-result
+  references, item/byte/token counts, projection version, truncation, and continuation.
+- [ ] Define per-service/operation projection allowlists. Raw Gmail/Drive/Docs/Chat data
+  must never be appended directly to an LLM conversation merely because a tool returned it.
+- [ ] Store necessary full results in bounded private durable storage and supply only the
+  projected result/reference to the model; preserve verifier access without public leakage.
+- [ ] Apply prompt-injection sanitization after structural projection and before any
+  remaining untrusted text reaches the model.
+
+### Epic 28.3 — Context-budget manager and safe recovery
+
+- [ ] Account before every model call for system/OKF/RAG/tool-schema/history/result and
+  reserved-completion tokens using the configured model budget.
+- [ ] Compact, paginate, defer, or deterministically replan before provider rejection;
+  never silently discard required postcondition data.
+- [ ] Classify context overflow as `model_context_length` with boundary, component,
+  service, operation, model, estimated tokens, result sizes, and safe recoverability.
+- [ ] Record only safe size/count telemetry, not private tool content; distinguish a
+  completed read sub-operation from a fully verified workflow step in progress reports.
+
+Guardrail: the reported Gmail -> Sheet -> Chat + Calendar/Meet request reaches the
+Gmail dependency result without full email bodies entering Groq, and oversized fake
+tool results are bounded before every model call.
+
+## Sprint 29 — Hierarchical failure and policy intelligence
+
+### Epic 29.1 — Occurrences and concrete clusters
+
+- [ ] Extend immutable occurrences with failure mechanism, architectural boundary,
+  provider code, safe payload-size facts, last verified sub-operation, recoverability,
+  affected versions, and reproduction/candidate linkage.
+- [ ] Version concrete fingerprints from mechanism + boundary + component + service +
+  operation + normalized provider code; exclude PII, volatile identifiers, and raw data.
+- [ ] Track cluster occurrence/version ranges, regression coverage, resolution version,
+  reopening, selected strategy, and active candidate without losing individual evidence.
+
+### Epic 29.2 — Cross-cluster policy themes
+
+- [ ] Replace the inactive category-only legacy proposal generator with a deterministic
+  cross-cluster theme analyzer based on shared mechanism/boundary/component family.
+- [ ] Require multiple concrete clusters, an evidence threshold, and confidence facts
+  before claiming a systemic issue; a broad label such as `execution` is insufficient.
+- [ ] Give every theme two bounded options (systemic fix and narrower containment),
+  acceptance tests, risks, scope, rollback, automation eligibility, and evidence links.
+- [ ] Version/deduplicate themes; rejected/expired/resolved items must not suppress new
+  evidence on a later deployment, while resolved versions do not create proposal spam.
+
+### Epic 29.3 — Portal, reporting, and lifecycle clarity
+
+- [ ] Separate Active Failures, Concrete Clusters, Policy Themes, Candidate Pipeline,
+  and collapsed History (rejected/expired/rolled-back/published) in the admin portal.
+- [ ] Make every button state its exact effect: strategy selection is not implementation,
+  candidate approval is not deployment, and activation is not promotion.
+- [ ] Add read-only reporting views, bounded metrics/alerts, Grafana panels, notification
+  ledgers, retention, and tenant/admin authorization for all three intelligence levels.
+- [ ] Remove the legacy category generator from active behavior after reversible migration
+  of its historical proposals; retain audit history without presenting it as new evidence.
+
+Guardrail: unrelated `execution` failures never share a code proposal solely because of
+their category; a multi-service unbounded-result theme requires at least two specific clusters.
+
+## Sprint 30 — Groq-only governed candidate engineering
+
+### Epic 30.1 — Candidate specification and reproduction
+
+- [ ] Convert a human-selected occurrence/cluster/theme option into a sanitized, typed
+  implementation specification with scope, invariants, acceptance tests, forbidden
+  effects, base version, expiry, and rollback requirements.
+- [ ] Reproduce using no-network Google adapters, synthetic bounded fixtures, or an
+  approved deterministic test; unresolved/private-only failures remain diagnosis-only.
+- [ ] Never send raw Workspace bodies, OAuth material, production secrets, or unrestricted
+  repository/database content to Groq.
+
+### Epic 30.2 — Adaptive single/multi-agent Groq builder
+
+- [ ] Implement a token-budgeted Groq coordinator using the existing configured Groq key.
+  Use one agent for small candidates and investigator/patch/test/reviewer roles only when
+  deterministic complexity/risk thresholds require them.
+- [ ] Expose least-privilege tools for repository listing/search/read, bounded patch
+  proposal/application, diff inspection, allowlisted validation, and candidate rollback.
+- [ ] Limit files, bytes, iterations, tool calls, elapsed time, and Groq tokens per build;
+  pause with truthful evidence instead of degrading to an unsafe or unrelated model.
+- [ ] Add a tool-extension designer that can draft a registered tool, schemas, adapter,
+  OAuth/precondition documentation, tests, and OKF concepts only as an untrusted candidate.
+- [ ] Require an independent Groq review role for security-sensitive or multi-file changes;
+  deterministic validators remain authoritative over model claims.
+
+### Epic 30.3 — Isolated candidate workspace and evidence
+
+- [ ] Run candidate builds in disposable Git worktrees/containers with no production
+  OAuth/database/deployment credentials, allowlisted network, resource/time limits,
+  approved path roots, secret/PII scans, and complete sanitized audit events.
+- [ ] Generate concrete files, content hashes, exact diff, base/candidate commit, validation
+  commands/results, security/privacy report, migration compatibility, and rollback manifest.
+- [ ] Register only reproducible candidates; failed builds remain visible with the exact
+  breaking point and cannot advance to canary.
+
+### Epic 30.4 — Trusted GitHub CI and PR handoff
+
+- [ ] Create a draft branch/PR only after the separately confirmed external-publication
+  action; never publish private evidence or secrets to the public repository.
+- [ ] Run backend/web/Flutter, migration, security, golden, replay, policy, dashboard, and
+  candidate-specific gates in GitHub Actions; bind evidence to immutable commit/artifact IDs.
+- [ ] Accept validation/deployment evidence only from a trusted CI/deployment identity,
+  not a browser-supplied `passed=true`; invalidate approvals after material changes.
+
+Guardrail: a Groq response alone cannot edit trusted main, register a passing candidate,
+create a production tool, deploy, approve, or publish.
+
+## Sprint 31 — Real version-pinned canary execution and deployment control
+
+### Epic 31.1 — Stable assignment and version-pinned workers
+
+- [ ] Add immutable executor/policy/prompt/OKF/chunker/candidate/cohort versions to each
+  run and assign eligible users deterministically with allow/deny overrides and sticky sessions.
+- [ ] Separate pilot admission from control/candidate routing. A pilot flag must not be
+  represented as a version router.
+- [ ] Make control and candidate workers claim only their assigned executor version so
+  competing deployments cannot execute the same run; pin in-flight runs across rollout changes.
+- [ ] Keep database migrations expand-first/backward-compatible until control retirement.
+
+### Epic 31.2 — Candidate artifact and Railway deployment controller
+
+- [ ] Build immutable candidate images/artifacts from trusted CI; record source commit,
+  digest, service/deployment IDs, environment profile, health, smoke results, and expiry.
+- [ ] Add a least-privilege Railway deployment adapter for isolated candidate workers and,
+  only when required, candidate API/frontend surfaces; never alter control during preparation.
+- [ ] Require human approval before production-connected deployment and separate human
+  activation before assigning real runs.
+- [ ] Verify candidate health and exact version from runtime telemetry before activation.
+
+### Epic 31.3 — Measurement, effective rollback, and promotion
+
+- [ ] Compare minimum-sample control/candidate completion, correctness, cancellation,
+  side-effect integrity, p95 latency, tokens, quota, verification, and incident rates.
+- [ ] On a safety/quality regression, stop new candidate assignment, route new runs to
+  control, reconcile uncertain writes, preserve evidence, and optionally terminate the
+  candidate deployment; database status alone is not rollback.
+- [ ] Require human promotion after a passing measured canary, then deploy/merge the frozen
+  candidate broadly and retain the last-known-good rollback path.
+- [ ] Provide a deterministic dry-run/local dual-worker simulator before Railway mutation.
+
+Guardrail: canary activation demonstrably changes which immutable executor handles an
+eligible new run, and automatic rollback demonstrably restores control routing.
+
+## Sprint 32 — Trusted OKF candidates in the improvement lifecycle
+
+- [ ] Treat generated OKF as untrusted drafts with provenance, owner, version, source
+  proposal/candidate, content hash, visibility, expiry, and publication status.
+- [ ] Validate OKF v0.1 structure/links, project governance fields, tool references,
+  secrets/PII, prompt-injection boundaries, replay behavior, and affected workflows.
+- [ ] Require human trusted-publication approval; synchronize only the frozen approved
+  hash and record the selected OKF version on every run.
+- [ ] Roll back by stopping new selection of the bad OKF version while preserving prior
+  run provenance; a knowledge document cannot add tools/scopes/permissions by itself.
+- [ ] Allow code candidates to include related OKF drafts, but keep code/tool and trusted
+  knowledge approvals explicit and independently auditable.
+
+## Sprint 33 — Evidence-gated dynamic programming candidates
+
+### Epic 33.1 — Quantized context knapsack
+
+- [ ] Implement a deterministic quantized 0/1 knapsack candidate after ACL filtering,
+  thresholding, parent dedupe, and diversity preprocessing; use true tokenizer costs,
+  reconstruct selected chunks, enforce source caps, and retain greedy fallback.
+- [ ] Bound candidate count, token units, memory, and latency; fall back truthfully when
+  constraints or time budgets are exceeded.
+- [ ] Compare identical labelled cases against greedy for retrieval/answer/citation quality,
+  latency, tokens, duplication, source coverage, and permission isolation.
+
+### Epic 33.2 — Later allocation or scheduling experiments
+
+- [ ] Define offline-only multiple-choice knapsack experiments for validated model/workflow
+  policies under token/latency/risk constraints; do not let optimization weaken write safety.
+- [ ] Compare DP batch quota allocation against existing admission/reserve/priority
+  heuristics before any runtime use; keep heap/queue scheduling for immediate dispatch.
+- [ ] Promote no DP policy without sufficient labelled evidence, passing regression gates,
+  bounded latency, human canary approval, and automatic fallback.
+
+Guardrail: DP is an evidence-gated candidate, not a claimed winner and not a substitute
+for deterministic structured Google operations or universal result bounds.
+
+## Sprint 34 — Extended observability, security, operations, and completion audit
+
+- [ ] Add safe result-budget, candidate-build, theme, assignment, deployment, rollback,
+  OKF-publication, and DP metrics/traces/events without high-cardinality labels or content.
+- [ ] Extend Grafana, Neon/DBeaver reporting, alerts, history/export/deletion, retention,
+  runbooks, architecture/state diagrams, on-call and external-blocker instructions.
+- [ ] Threat-model Groq prompt injection, malicious candidate patches, sandbox escapes,
+  secret exfiltration, poisoned fixtures, approval replay, CI forgery, worker-version races,
+  migration incompatibility, and unsafe rollback.
+- [ ] Run unit/integration/no-network/golden/replay/policy/RAG/DP/candidate/sandbox/migration,
+  Python lint/security/dependency, web, Flutter, Compose, secret/history, CI and production
+  smoke gates; verify exact deployed versions and rollback evidence.
+- [ ] Re-audit every Sprint 28–34 story against authoritative files, database state, CI,
+  deployments, dashboards, and runtime behavior before declaring completion.
 
 ## 5. Required implementation reports
 

@@ -1,9 +1,12 @@
 import pytest
 import importlib
-from langchain_core.messages import AIMessage
+from unittest.mock import MagicMock
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from app.rag.context_packer import pack_context, sanitize_untrusted_content
+from app.rag.context_packer import (
+    pack_context, sanitize_untrusted_content, select_context_documents,
+)
 from app.rag.retriever import _recency_bonus
 from app.rag.evaluation import retrieval_metrics
 from app.mlops.ragas_eval import _context_text, _retrieved_contexts
@@ -17,6 +20,8 @@ from app.agents.supervisor import (
     recover_rejected_tool_call,
     supervisor_node,
 )
+from app.agents.context_budget import fit_messages_to_budget
+from app.agents.errors import ModelContextLengthFailure, is_provider_context_length_error
 from app.api.middleware.auth import create_token
 from app.api.routes.chat import capability_answer, classify_graph_results
 from app.api.routes.feedback import _dataset_split, _sanitize_value
@@ -42,7 +47,8 @@ from app.rag.chunking import (
 from app.rag.chunking_evaluation import evaluate_chunk_policy
 from app.runs.worker import classify_error, verify_step
 from app.tools.base import tool_run_id
-from app.tools.registry import _request_id
+from app.tools.registry import _request_id, list_recent_gmail_senders
+from app.tools.result_projection import project_tool_result
 from app.tools.registry import registered_tool_names
 from app.evaluation.replay import replay_case
 from app.improvements.analyzer import assess_canary
@@ -50,6 +56,8 @@ from app.improvements.publisher import proposal_markdown
 from app.improvements.candidates import (
     candidate_digest, validate_candidate_files,
 )
+from app.improvements.builder import choose_builder_mode
+from app.improvements.routing import stable_bucket
 from app.improvements.failure_intelligence import (
     analyze_failure, failure_fingerprint, sanitize_request_excerpt,
 )
@@ -63,6 +71,21 @@ def test_context_packer_orders_by_score():
         {"source": "high", "content": "first", "score": 0.9},
     ])
     assert text.index("first") < text.index("second")
+
+
+def test_quantized_dp_can_outperform_greedy_context_packing():
+    # Greedy takes the highest single score (cost 8), while DP finds two cost-5
+    # items with a larger combined evidence value under cost 10.
+    docs = [
+        {"content": "a " * 8, "score": 9.0, "source": "large"},
+        {"content": "b " * 5, "score": 6.0, "source": "small-b"},
+        {"content": "c " * 5, "score": 6.0, "source": "small-c"},
+    ]
+    # Use one-token quantum so the test exercises exact knapsack behavior.
+    greedy = select_context_documents(docs, 12, strategy="greedy", quantum=1)
+    dynamic = select_context_documents(docs, 12, strategy="dp", quantum=1)
+    assert dynamic.estimated_value >= greedy.estimated_value
+    assert dynamic.estimated_tokens <= 12
 
 
 def test_versioned_grafana_dashboards_are_publishable():
@@ -601,11 +624,29 @@ def test_implementation_candidate_requires_safe_concrete_files():
     assert candidate_digest("abcdef1", files, {"passed": True}) == candidate_digest(
         "abcdef1", files, {"passed": True}
     )
+    assert candidate_digest(
+        "abcdef1", files, {"passed": True}, candidate_kind="code",
+        candidate_version="abcdef2", exact_diff="one",
+        rollback_plan={"action": "control"},
+    ) != candidate_digest(
+        "abcdef1", files, {"passed": True}, candidate_kind="code",
+        candidate_version="abcdef2", exact_diff="one",
+        rollback_plan={"action": "delete"},
+    )
     errors = validate_candidate_files([
         {"path": "../.env", "change_type": "replace", "content": "API_KEY=x"},
     ])
     assert any("Unsafe" in error for error in errors)
     assert any("credentials" in error or "secret-like" in error for error in errors)
+
+
+def test_candidate_routing_and_builder_mode_are_stable_and_bounded():
+    first = stable_bucket("canary-1", "person@example.com")
+    assert first == stable_bucket("canary-1", "person@example.com")
+    assert 0 <= first < 100
+    assert choose_builder_mode("low", ["planner"]) == "single"
+    assert choose_builder_mode("high", ["planner"]) == "multi_role"
+    assert choose_builder_mode("medium", ["a", "b", "c", "d"]) == "multi_role"
 
 
 def test_added_google_scopes_require_fresh_consent():
@@ -663,7 +704,11 @@ def test_people_sheet_chat_calendar_meet_request_uses_contextual_dag():
     )
     assert plan.services == ["gmail", "sheets", "chat", "calendar"]
     steps = {step.service: step for step in plan.steps}
-    assert steps["gmail"].operation == "search"
+    assert steps["gmail"].operation == "recent_senders"
+    assert steps["gmail"].arguments["allowed_tools"] == ["list_recent_gmail_senders"]
+    assert steps["gmail"].arguments["tool_arguments"] == {
+        "max_results": 20, "query": "-in:sent", "unique": True,
+    }
     assert steps["sheets"].dependencies == [steps["gmail"].id]
     assert steps["chat"].dependencies == [steps["sheets"].id]
     assert steps["calendar"].dependencies == [steps["sheets"].id]
@@ -676,10 +721,88 @@ def test_people_sheet_chat_calendar_meet_request_uses_contextual_dag():
     ]
     assert validate_plan(plan) == []
     assert [step.operation for step in plan.steps] == [
-        "search", "create_and_write", "send", "create",
+        "recent_senders", "create_and_write", "send", "create",
     ]
     assert plan.steps[0].read_only is True
     assert plan.steps[1].read_only is False
+
+
+def test_gmail_sender_listing_uses_metadata_only_and_deduplicates(monkeypatch):
+    service = MagicMock()
+    service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+        "messages": [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}],
+    }
+    get_request = service.users.return_value.messages.return_value.get
+    get_request.return_value.execute.side_effect = [
+        {"id": "m1", "threadId": "t1", "payload": {"headers": [
+            {"name": "From", "value": "Alice <alice@example.com>"},
+            {"name": "Date", "value": "Mon, 20 Jul 2026 10:00:00 +0530"},
+        ]}},
+        {"id": "m2", "threadId": "t2", "payload": {"headers": [
+            {"name": "From", "value": "Alice Again <ALICE@example.com>"},
+        ]}},
+        {"id": "m3", "threadId": "t3", "payload": {"headers": [
+            {"name": "From", "value": "Bob <bob@example.com>"},
+        ]}},
+    ]
+    monkeypatch.setattr("app.tools.registry.g.gmail_service", service)
+    result = list_recent_gmail_senders.invoke({"max_results": 2, "scan_limit": 10})
+    assert [item["sender_email"] for item in result["senders"]] == [
+        "alice@example.com", "bob@example.com",
+    ]
+    assert result["scanned"] == 3
+    for call in get_request.call_args_list:
+        assert call.kwargs["format"] == "metadata"
+        assert call.kwargs["metadataHeaders"] == ["From", "Date"]
+
+
+def test_tool_projection_strips_gmail_bodies_and_is_token_bounded():
+    sentinel = "SECRET_BODY_SENTINEL"
+    result = [{
+        "id": "m1", "thread_id": "t1", "sender": "a@example.com",
+        "subject": "subject", "snippet": "safe", "body_plain": sentinel * 1000,
+        "body_html": f"<p>{sentinel}</p>" * 1000,
+    }]
+    envelope = project_tool_result("search_gmail", result, max_tokens=128)
+    assert sentinel not in str(envelope.compact_result)
+    assert envelope.estimated_tokens <= 128
+    assert envelope.original_bytes > envelope.projected_bytes
+    assert envelope.truncated is True
+
+
+def test_context_budget_compacts_old_tool_results_and_fails_preflight():
+    @tool
+    def noop(value: str) -> str:
+        """A bounded test tool."""
+        return value
+
+    messages = [
+        HumanMessage(content="perform task"),
+        ToolMessage(content="large " * 1000, tool_call_id="one", name="noop"),
+        HumanMessage(content="continue"),
+    ]
+    fitted, report = fit_messages_to_budget(
+        messages, [noop], context_limit=500, reserved_completion_tokens=100,
+        safety_tokens=50,
+    )
+    assert "compacted" in fitted[1].content
+    assert report.compaction_count == 1
+    with pytest.raises(ModelContextLengthFailure):
+        fit_messages_to_budget(
+            [HumanMessage(content="huge " * 5000)], [noop], context_limit=200,
+            reserved_completion_tokens=100, safety_tokens=50,
+        )
+
+
+def test_provider_message_overflow_has_specific_taxonomy():
+    error = RuntimeError(
+        "400 invalid_request_error: Please reduce the length of the messages or "
+        "completion. param: messages"
+    )
+    assert is_provider_context_length_error(error) is True
+    assert classify_error(ModelContextLengthFailure(
+        "bounded request too large", boundary="context_preflight",
+    )) == "model_context_length"
 
 
 def test_failure_analysis_is_private_granular_and_has_exactly_two_options():

@@ -128,7 +128,7 @@ def test_contextual_workflow_and_failure_inbox_are_durable():
         run_id = response.json()["run_id"]
         run = client.get(f"/runs/{run_id}", headers=headers).json()
         assert [(item["service"], item["operation"]) for item in run["steps"]] == [
-            ("gmail", "search"), ("sheets", "create_and_write"),
+            ("gmail", "recent_senders"), ("sheets", "create_and_write"),
             ("chat", "send"), ("calendar", "create"),
         ]
         assert run["steps"][2]["dependencies"] == ["execute_sheets"]
@@ -975,6 +975,26 @@ def test_diagnosis_only_proposal_cannot_be_approved_for_canary():
             headers=headers,
             json={"decision": "approved", "proposal_hash": candidate_hash},
         )
+        assert approved.status_code == 409
+        assert "trusted CI" in approved.json()["detail"]
+
+        async def attach_trusted_ci_fixture():
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE improvement_proposals SET validation_report=$1::jsonb
+                       WHERE proposal_key=$2""",
+                    json.dumps({"passed": True, "commands": ["pytest tests/unit -q"],
+                                "trusted_identity": "github-actions:test"}),
+                    proposal_key,
+                )
+
+        client.portal.call(attach_trusted_ci_fixture)
+        approved = client.post(
+            f"/admin/improvements/{proposal_key}/canary-decision",
+            headers=headers,
+            json={"decision": "approved", "proposal_hash": candidate_hash},
+        )
         assert approved.status_code == 200
         blocked_activation = client.post(
             f"/admin/improvements/{proposal_key}/activate-canary",
@@ -991,7 +1011,23 @@ def test_diagnosis_only_proposal_cannot_be_approved_for_canary():
                 "verified": True, "smoke_tests": {"passed": True},
             },
         )
-        assert deployed.status_code == 200
+        assert deployed.status_code == 409
+        assert "trusted isolated deployment controller" in deployed.json()["detail"]
+
+        async def attach_trusted_deployment_fixture():
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE improvement_proposals SET deployment_evidence=$1::jsonb
+                       WHERE proposal_key=$2""",
+                    json.dumps({
+                        "candidate_version": "abcdef2", "verified": True,
+                        "smoke_tests": {"passed": True},
+                        "trusted_identity": "github-actions:test-deploy",
+                    }), proposal_key,
+                )
+
+        client.portal.call(attach_trusted_deployment_fixture)
         activated = client.post(
             f"/admin/improvements/{proposal_key}/activate-canary",
             headers=headers,
@@ -1036,19 +1072,21 @@ def test_canary_regression_is_evaluated_and_rolled_back():
                     await conn.execute(
                         """INSERT INTO agent_runs
                            (session_id,user_id,request,status,idempotency_key,
-                            deployment_version,started_at,completed_at,input_tokens)
-                           VALUES($1,'fixture@example.com','fixture','completed',$2,$3,
-                                  now()-interval '2 seconds',now(),100)""",
-                        marker, f"{marker}-control-{index}", source,
+                            deployment_version,executor_version,canary_id,cohort_assignment,
+                            started_at,completed_at,input_tokens)
+                           VALUES($1,'fixture@example.com','fixture','completed',$2,$3,$3,$4,
+                                  'control',now()-interval '2 seconds',now(),100)""",
+                        marker, f"{marker}-control-{index}", source, canary_id,
                     )
                     await conn.execute(
                         """INSERT INTO agent_runs
                            (session_id,user_id,request,status,idempotency_key,
-                            deployment_version,started_at,completed_at,input_tokens,
+                            deployment_version,executor_version,canary_id,cohort_assignment,
+                            started_at,completed_at,input_tokens,
                             side_effect_integrity)
-                           VALUES($1,'fixture@example.com','fixture','partial',$2,$3,
-                                  now()-interval '4 seconds',now(),200,0)""",
-                        marker, f"{marker}-candidate-{index}", candidate,
+                           VALUES($1,'fixture@example.com','fixture','partial',$2,$3,$3,$4,
+                                  'candidate',now()-interval '4 seconds',now(),200,0)""",
+                        marker, f"{marker}-candidate-{index}", candidate, canary_id,
                     )
             changed = await evaluate_active_canaries(pool)
             async with pool.acquire() as conn:
