@@ -39,6 +39,13 @@ external credentials or longitudinal production evidence.
   `log.md` are not concepts, the root index declares `okf_version: "0.1"`, minimal
   concepts require only `type`, and broken links remain consumable. Production
   synchronization separately enforces this project's human-approval profile.
+- Sprint 27 adds a guarded six-way Workspace intent gateway, context-sensitive
+  multi-service DAG planning, and durable failure intelligence for pre-execution and
+  terminal failures. Every incident has a privacy-bounded fingerprint, two review
+  strategies, and human-labelled proposal conversion.
+- Migration 010 adds three read-only failure reporting views. The protected portal,
+  Prometheus metrics/alerts, and version-controlled Grafana dashboards expose the new
+  review and notification state without high-cardinality metric labels.
 
 ## Direct evaluation evidence
 
@@ -57,10 +64,19 @@ The authoritative commands are the repository CI jobs, `pytest tests/`,
 `scripts/run_policy_evals.py`.
 
 The final verified evidence is recorded in the progress log and repository CI.
-It includes exact-image and host backend suites, 22 planner golden cases, four
+It includes exact-image and host backend suites, 28 planner golden cases, four
 no-network mutation replays, migration downgrade/forward repair through revision
-008, Python/web/mobile security and build gates, healthy local and production
+010, Python/web/mobile security and build gates, healthy local and production
 services, 17 evaluated Grafana Cloud rules, and 34 installed dashboard panels.
+
+The production failure audit also found five recent terminal runs that predated the
+failure inbox. Its first backfill exposed a JSON serialization defect: PostgreSQL
+completion percentages arrived as `Decimal` values and were silently skipped. The
+analyzer now converts telemetry to JSON-safe numbers, normalizes JSON/JSONB objects,
+and logs only the run ID plus exception type when a historical row cannot be processed.
+The corrected backfill created five sanitized incidents, five two-option reviews, and
+twenty channel-ledger rows. Admin/Grafana delivery is internal; email/GitHub remain
+skipped behind explicit configuration and approval.
 
 ## Correctly unresolved conclusions
 
@@ -80,7 +96,7 @@ These are not replaced with fabricated synthetic production claims.
 
 ## Teaching deliverable
 
-The post-upgrade teaching phase is complete and grounded in the repository rather
+The post-upgrade teaching curriculum is implemented and grounded in the repository rather
 than generic examples. It covers execution DAGs and topological order, durable state
 machines, PostgreSQL queues and leases, idempotency and effectively-once effects,
 source-aware chunk trees, sliding windows, HNSW and reciprocal-rank fusion, greedy
@@ -88,8 +104,9 @@ versus dynamic-programming context packing, memoization and incremental embeddin
 bounded backtracking and compensation, admission/rate limiting, consistent hashing,
 contextual bandits, MDP trajectories, offline-RL safety boundaries, and OKF v0.1 plus
 the project's stricter publication profile. The durable course is
-`docs/TEACHING_AGENTIC_DSA_OKF.md`; the interactive walkthrough was delivered after
-the working engineering upgrade, as required.
+`docs/TEACHING_AGENTIC_DSA_OKF.md`, with a focused OKF companion in
+`docs/OKF_PROJECT_GUIDE.md`. Interactive lessons proceed after the working engineering
+upgrade, beginning with dynamic programming and guarded policy selection.
 
 ## Final requirement disposition
 
@@ -100,8 +117,9 @@ the working engineering upgrade, as required.
   production connection uses `dbeaver_analyst`, SSL, a read-only server role, and
   `save-password: false`; the credential is stored in macOS Keychain and was verified
   against Neon without exposing it.
-- Engineering implementation, deployment, observability, documentation, tests, and
-  teaching: complete and verified.
+- Engineering implementation, deployment, observability, documentation, and tests:
+  complete and verified. The durable teaching material is complete; interactive
+  teaching remains an ongoing user-facing phase.
 - Longitudinal pilot expansion, policy/RAG winners, and real external proposal delivery:
   cannot be completed without real users, elapsed labelled evidence, or the expressly
   required human publication decision.

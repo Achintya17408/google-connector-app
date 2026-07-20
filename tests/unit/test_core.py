@@ -7,6 +7,8 @@ from app.rag.context_packer import pack_context, sanitize_untrusted_content
 from app.rag.evaluation import retrieval_metrics
 from app.mlops.ragas_eval import _context_text, _retrieved_contexts
 from scripts.run_ragas_eval import _score_payload
+from scripts.sync_grafana_dashboards import build_dashboard_payload
+from app.improvements.analyzer import _json_object, _number
 from app.evaluation.metrics import compare_policy_metrics, evaluate_plan
 from app.agents.router import route_model_node
 from app.agents.supervisor import (
@@ -60,6 +62,33 @@ def test_context_packer_orders_by_score():
         {"source": "high", "content": "first", "score": 0.9},
     ])
     assert text.index("first") < text.index("second")
+
+
+def test_versioned_grafana_dashboards_are_publishable():
+    for name, expected_uid in (
+        ("google-connector.json", "google-connector-agent"),
+        ("session-operations.json", "google-connector-sessions"),
+    ):
+        payload = build_dashboard_payload(
+            Path("monitoring/grafana/dashboards") / name, "agent-observability"
+        )
+        assert payload["overwrite"] is True
+        assert payload["folderUid"] == "agent-observability"
+        assert payload["dashboard"]["uid"] == expected_uid
+        assert payload["dashboard"]["panels"]
+
+
+def test_failure_analyzer_normalizes_json_objects():
+    assert _json_object('{"breaking_point":"planner"}') == {
+        "breaking_point": "planner"
+    }
+    assert _json_object({"kind": "workspace_action"}) == {
+        "kind": "workspace_action"
+    }
+    assert _json_object("not-json") == {}
+    assert _json_object("[]") == {}
+    assert _number("12.5", 0) == 12.5
+    assert _number(None, 100) == 100
 
 
 def test_ragas_context_uses_retrieved_content_not_metadata_repr():

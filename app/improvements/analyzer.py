@@ -1,11 +1,14 @@
 import asyncio
 import hashlib
 import json
+import logging
 from contextlib import suppress
 from datetime import date
 
 from app.improvements.failure_intelligence import record_failure_incident
 
+
+logger = logging.getLogger(__name__)
 
 FAILURE_RECOMMENDATIONS = {
     "rate_limit": "Add quota-aware deferral and reserve the quality model for complex execution.",
@@ -20,6 +23,27 @@ FAILURE_RECOMMENDATIONS = {
 CANARY_MIN_SAMPLES = 5
 CANARY_LATENCY_RATIO = 1.25
 CANARY_TOKEN_RATIO = 1.25
+
+
+def _json_object(value) -> dict:
+    """Normalize JSON/JSONB values returned by pools without a JSON codec."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _number(value, default: float) -> float:
+    """Return a JSON-safe telemetry number for Decimal-backed database columns."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def assess_canary(control: dict, candidate: dict) -> dict:
@@ -80,7 +104,7 @@ async def analyze_recent_failures(pool) -> int:
     created = 0
     for row in rows:
         run = dict(row)
-        incident = run.get("incident_summary") or {}
+        incident = _json_object(run.get("incident_summary"))
         try:
             await record_failure_incident(
                 pool, occurrence_key=f"run:{run['id']}:backfill", run_id=run["id"],
@@ -89,15 +113,24 @@ async def analyze_recent_failures(pool) -> int:
                 stage="execution", category=run.get("error_category") or "execution",
                 component="durable_worker", error=run.get("error_message") or "unknown failure",
                 breaking_point=incident.get("breaking_point"),
-                completion={"technical": run.get("technical_completion", 0),
-                            "functional": run.get("functional_completion", 0),
-                            "user_visible": run.get("user_visible_completion", 0),
-                            "side_effect_integrity": run.get("side_effect_integrity", 100)},
-                evidence={"source": "terminal_run_backfill"}, policy=run.get("plan") or {},
+                completion={
+                    "technical": _number(run.get("technical_completion"), 0),
+                    "functional": _number(run.get("functional_completion"), 0),
+                    "user_visible": _number(run.get("user_visible_completion"), 0),
+                    "side_effect_integrity": _number(
+                        run.get("side_effect_integrity"), 100
+                    ),
+                },
+                evidence={"source": "terminal_run_backfill"},
+                policy=_json_object(run.get("plan")),
             )
             created += 1
-        except Exception:
+        except Exception as exc:
             # The next analysis pass retries; one malformed historical row cannot block others.
+            logger.warning(
+                "Failure-incident backfill skipped run_id=%s error_type=%s",
+                run.get("id"), type(exc).__name__,
+            )
             continue
     return created
 

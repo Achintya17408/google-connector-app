@@ -74,6 +74,30 @@ endpoints must use HTTPS. The API and worker derive distinct service names from
 `RAILWAY_SERVICE_NAME`; local Compose sets them explicitly. With no endpoint the
 instrumentation remains local/inert and does not attempt an export.
 
+## Grafana Cloud dashboard synchronization
+
+Dashboard JSON is version-controlled under `monitoring/grafana/dashboards`. Validate
+both dashboards without credentials or writes:
+
+```bash
+python scripts/sync_grafana_dashboards.py
+```
+
+Publishing is a separately authorized external write. Create a Grafana service-account
+token with dashboard write access, keep it out of Git and shell history, then run:
+
+```bash
+export GRAFANA_URL=https://pluckypanther2969.grafana.net
+export GRAFANA_SERVICE_ACCOUNT_TOKEN=... # enter locally; never paste into chat
+python scripts/sync_grafana_dashboards.py --apply \
+  --confirmation 'SYNC GRAFANA DASHBOARDS'
+unset GRAFANA_SERVICE_ACCOUNT_TOKEN
+```
+
+The synchronizer validates required dashboard fields, requires HTTPS, overwrites only
+the two stable dashboard UIDs, and never prints the token. Without `--apply` it performs
+no network request.
+
 ## Rollback
 
 1. Stop the worker so no new step is claimed.

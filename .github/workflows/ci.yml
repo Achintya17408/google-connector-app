@@ -46,6 +46,8 @@ jobs:
         run: python scripts/run_workflow_replays.py
       - name: Compare candidate policy offline without live exploration
         run: python scripts/run_policy_evals.py
+      - name: Validate version-controlled Grafana dashboards
+        run: python scripts/sync_grafana_dashboards.py
       - name: Verify migration downgrade and forward repair
         run: |
           alembic downgrade 002
