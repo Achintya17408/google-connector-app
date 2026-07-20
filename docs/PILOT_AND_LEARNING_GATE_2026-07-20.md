@@ -10,14 +10,14 @@ The production Neon audit on 2026-07-20 found:
 
 | Evidence | Current value | Consequence |
 | --- | ---: | --- |
-| Distinct durable-run users | 1 | No multi-user pilot conclusion is possible. |
-| Durable runs | 1 failed | Reliability and latency comparisons are not representative. |
-| Feedback | 6 positive, 5 negative | Useful incident evidence, but not enough controlled trajectories. |
-| Scored prompt metrics | 13 runtime samples | These are operational observations, not RAG relevance judgments. |
+| Distinct durable-run users | 2 | No staged multi-user pilot conclusion is possible. |
+| Durable runs | 5: 1 completed, 4 failed | Reliability and latency comparisons are not representative. |
+| Feedback | 7 positive, 8 negative | Useful incident evidence, but not enough controlled trajectories. |
+| Scored prompt metrics | 59 runtime samples | These are operational observations, not RAG relevance judgments. |
 | Valid `rag_evaluation` samples | 0 | Chunker/retriever regression and promotion remain blocked. |
-| Workflow evaluations | 1 | No workflow-policy winner can be selected. |
+| Workflow evaluations | 5 | No workflow-policy winner can be selected. |
 | Policy evaluation reports | 0 | No candidate policy has passed the governed promotion gate. |
-| Improvement proposals | 0 | There is currently nothing awaiting approval or publication. |
+| Improvement proposals | 1 diagnosis-only finding awaiting review | It cannot be approved for canary because it contains no validated implementation candidate. |
 
 ## Implemented gates
 
@@ -44,6 +44,11 @@ metrics from requests that did not use RAG cannot satisfy this gate. Each exampl
 have a provenance-bearing judgment such as retrieval relevance, context precision,
 context recall, faithfulness, or citation correctness. A sample-deficit alert reports
 when this evidence has not accumulated; it does not substitute synthetic success.
+
+The repository also runs `scripts/run_chunking_evals.py` against deterministic source
+fixtures for 256/512/768/1024-token policies. This is a structural CI guard for token
+boundaries, overlap, lineage, duplicate context, and lexical retrieval behavior. It
+does not satisfy the ten-production-sample gate and does not change the live chunker.
 
 ### Pilot rollout
 

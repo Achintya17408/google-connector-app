@@ -40,6 +40,8 @@ jobs:
           bandit -q -r app -x app/__pycache__ -ll
       - name: Run deterministic planner regression set
         run: python scripts/run_golden_evals.py
+      - name: Compare source-aware chunk-size hypotheses
+        run: python scripts/run_chunking_evals.py
       - name: Replay Google mutations against the no-network simulator
         run: python scripts/run_workflow_replays.py
       - name: Compare candidate policy offline without live exploration
