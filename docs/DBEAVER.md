@@ -14,6 +14,14 @@ Use three visually distinct connections under the `Google Connector` folder.
 
 Create/rotate the role with `scripts/configure_reporting_role.sql` using the Neon owner connection. Store the generated password only in DBeaver secure storage/macOS Keychain.
 
+Verified on 2026-07-20: all three connection definitions are installed without saved
+passwords. The production `dbeaver_analyst` secret is stored in macOS Keychain under
+service `google-connector-neon-reporting`. Connecting with that credential reports
+`transaction_read_only=on`, permits `reporting.session_summary`, and denies
+`google_oauth_credentials`. If DBeaver should remember the password itself, copy it
+locally from Keychain into DBeaver's password field and select Save password; that
+optional GUI action stores a second copy in DBeaver's encrypted credential vault.
+
 ## Local Homebrew
 
 - Name: `Google Connector — LOCAL HOMEBREW`

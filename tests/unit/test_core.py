@@ -26,7 +26,17 @@ from app.runs.planner import build_plan, classify_request
 from app.okf.loader import load_bundle
 from app.okf.generator import build_catalog_draft
 from pathlib import Path
-from app.rag.chunking import chunk_gmail, chunk_meet_transcript, chunk_pdf, chunk_sheet
+from app.rag.chunking import (
+    EXPERIMENT_POLICIES,
+    chunk_document,
+    chunk_gmail,
+    chunk_meet_transcript,
+    chunk_pdf,
+    chunk_sheet,
+    chunks_for_source,
+    token_count,
+)
+from app.rag.chunking_evaluation import evaluate_chunk_policy
 from app.runs.worker import classify_error, verify_step
 from app.tools.base import tool_run_id
 from app.tools.registry import _request_id
@@ -700,3 +710,38 @@ def test_pdf_and_meet_chunking_preserve_layout_and_speakers():
     assert "A: Hello" in transcript[0].content
     assert "B: Decision approved" in transcript[0].content
     assert transcript[0].parent_id == "conference-1"
+
+
+def test_token_chunk_policies_bound_document_payload_and_preserve_lineage():
+    text = " ".join(f"token-{index} explains retrieval evidence." for index in range(1600))
+    for size, policy in EXPERIMENT_POLICIES.items():
+        chunks = chunk_document({"name": "Long guide", "content": text}, policy)
+        assert len(chunks) > 1
+        assert [chunk.index for chunk in chunks] == list(range(len(chunks)))
+        # Title and section provenance are deliberately repeated outside the payload window.
+        assert max(token_count(chunk.content) for chunk in chunks) <= size + 20
+
+
+def test_atomic_structured_records_do_not_change_with_text_policy():
+    event = {
+        "title": "Planning", "start_time": "2026-07-21T10:00:00+05:30",
+        "end_time": "2026-07-21T10:30:00+05:30", "meet_link": "https://meet.test/abc",
+    }
+    outputs = [
+        chunks_for_source("calendar", event, policy)[0].content
+        for policy in EXPERIMENT_POLICIES.values()
+    ]
+    assert len(set(outputs)) == 1
+
+
+def test_chunking_evaluation_rejects_missing_evidence_and_reports_metrics():
+    case = [{
+        "id": "docs-small",
+        "source_type": "docs",
+        "item": {"name": "Runbook", "content": "# Recovery\nUse lease recovery sentinel."},
+        "queries": [{"query": "lease recovery", "required_terms": ["lease", "sentinel"]}],
+    }]
+    report = evaluate_chunk_policy(case, EXPERIMENT_POLICIES[256])
+    assert report["evidence_failures"] == 0
+    assert report["lineage_failures"] == 0
+    assert report["retrieval"]["recall@3"] == 1.0

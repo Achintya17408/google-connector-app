@@ -220,7 +220,8 @@ Guardrail: disconnect/restart tests prove the worker continues and writes are no
 
 ### Epic 6.2 — Versioned experiments and lineage
 
-- [~] Evaluate 256/512/768/1024-token and source-dependent policies, overlap, parent sizes, and no-chunk cases.
+- [x] Implement and run a deterministic no-network comparison of 256/512/768/1024-token policies, overlaps, lineage, duplication, and structured no-chunk cases; keep the production default unchanged.
+- [~] Select source-dependent overlap/parent sizes only after at least ten tenant-safe labelled RAG cases exist; synthetic lexical evidence cannot choose a production winner.
 - [x] Store source/parent/chunk position/hash, ACL/tenant, embedding/chunker/sync versions, timestamps, tombstones, provenance, and reindex time.
 - [x] Incrementally re-embed only changed content/version/metadata.
 
@@ -228,7 +229,7 @@ Guardrail: disconnect/restart tests prove the worker continues and writes are no
 
 - [x] Query classification -> structured filters -> dense vector + PostgreSQL text search -> rank fusion -> recency/metadata -> dedupe/diversity -> rerank -> threshold/budget -> context/citations.
 - [~] Evaluate query normalization/entity/date/acronym/multi-query/HyDE only where measured; never expand precise identifiers/latest lookups unnecessarily.
-- [~] Evaluate recall@k, precision@k, MRR, nDCG, context precision/recall, faithfulness, relevance, citation correctness, latency, tokens, duplication, cost, and permission leaks per source.
+- [~] Offline policy CI now measures recall@k, precision@k, MRR, nDCG, latency, token size, duplication, evidence presence, and lineage. Production context precision/recall, faithfulness, relevance, citations, cost, and permission-leak comparison remain gated on labelled per-source evidence.
 
 ## Sprint 7 — Decouple embedding from live tools
 
@@ -327,7 +328,7 @@ Guardrail: disconnect/restart tests prove the worker continues and writes are no
 - [x] Create `dbeaver_analyst`-style Neon role and curated reporting schema/views with no secret table access.
 - [x] Configure production Neon, local Homebrew, and local Docker connections with approved names/colors/folders/read-only settings.
 - [x] Provide ER diagram and views for run status, timeline, failure, models/tokens, retrieval, tools, artifacts, prompts, session history, security, improvements, and canaries.
-- [!] Store credentials only in DBeaver secure storage; final master-password/GUI confirmation remains a user-local interaction.
+- [x] Keep connection definitions password-free, store the production analyst credential in macOS Keychain, and verify the same credential can read reporting views while PostgreSQL enforces read-only mode and denies the OAuth credential table. DBeaver may still prompt once if the user elects to copy the Keychain secret into DBeaver's own vault.
 
 ## Sprint 21 — Deployment, canary, and rollback
 
@@ -431,3 +432,4 @@ After implementation and verification, teach through this repository:
 - 2026-07-20: Completed the requested post-upgrade teaching phase through this repository: DAG/topological execution, durable state machines and queues, DP context packing, idempotency, chunk trees/windows, HNSW/hybrid retrieval, memoization, compensation, rate limiting, consistent hashing, bandits/MDPs/offline RL, and practical OKF v0.1 governance. The final strict audit confirms all autonomous engineering work is complete; only secure-vault GUI entry, real pilot evidence, and confirmation-gated external publication remain externally dependent.
 - 2026-07-20: Diagnosed the production Improvement portal's vague load failure from bounded route telemetry: all observed admin requests were HTTP 401, so no database query failed. Updated the portal to distinguish expired/missing sessions from non-admin access, clear expired tokens, offer Google reauthentication, stop presenting unauthenticated default rollout values, and hide protected controls until authorization succeeds. Commit `cd03279` deployed successfully to Vercel and Railway; live portal and health endpoints return 200, and web/backend CI pass.
 - 2026-07-20: Audited Sprint 24 and corrected an overstated completion claim: recurring-failure recommendations were diagnosis-level text with synthetic candidate labels, not implementation candidates. Migration 009 now marks them `diagnosis_only`, stores concrete candidate files/hashes/manifests/validation/deployment evidence, blocks canary approval and activation without those proofs, publishes real files in governed draft PRs, and requires change-request notes. Fixed durable product-information routing with a trusted registry-derived responder that makes zero Google/RAG/LLM calls. PR #20 merged as `11cd477`; PR and main backend/web/Flutter CI, production deployment, Railway API/worker health, Vercel, and Neon 009 pass. The existing execution proposal is truthfully `diagnosis_only:none` and was not approved or activated.
+- 2026-07-20: Added an offline source-aware chunk-policy gate for 256/512/768/1024-token hypotheses with compact source fixtures, token/overlap accounting, retrieval metrics, evidence and lineage validation, and CI coverage. The current synthetic suite passes every policy but explicitly selects no production winner; live Neon still has zero valid `rag_evaluation` samples. Reverified the installed password-free DBeaver definitions and the macOS-Keychain-backed `dbeaver_analyst`: reporting access succeeds, transactions are read-only, and OAuth credential reads are denied.

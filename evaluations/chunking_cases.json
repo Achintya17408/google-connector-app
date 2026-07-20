@@ -1,0 +1,102 @@
+[
+  {
+    "id": "drive-long-policy-boundaries",
+    "source_type": "docs",
+    "item": {
+      "name": "Long retrieval manual",
+      "mime_type": "application/vnd.google-apps.document",
+      "generated_sections": [
+        {"heading": "Index health", "sentence": "Routine index health checks measure latency and preserve tenant boundaries.", "repeat": 180},
+        {"heading": "Rare recovery", "sentence": "The ultramarine semaphore identifies the recoverable embedding incident.", "repeat": 180},
+        {"heading": "Publication", "sentence": "A verified human approval precedes every external publication action.", "repeat": 180}
+      ]
+    },
+    "queries": [
+      {"query": "ultramarine semaphore recovery", "required_terms": ["ultramarine", "semaphore"]},
+      {"query": "external publication approval", "required_terms": ["external", "publication"]}
+    ]
+  },
+  {
+    "id": "gmail-thread-cleaning",
+    "source_type": "gmail",
+    "item": {
+      "subject": "Quarterly launch",
+      "sender": "owner@example.test",
+      "received_at": "2026-07-19T09:00:00Z",
+      "thread_id": "thread-launch",
+      "body_plain": "The launch decision uses the cobalt checklist and the northstar approval. The operations team must verify both terms before publishing. On Monday someone wrote:\nRepeated historical material that must be removed."
+    },
+    "queries": [
+      {"query": "cobalt checklist", "required_terms": ["cobalt", "checklist"]},
+      {"query": "northstar approval", "required_terms": ["northstar", "approval"]}
+    ]
+  },
+  {
+    "id": "drive-heading-hierarchy",
+    "source_type": "docs",
+    "item": {
+      "name": "Operations handbook",
+      "mime_type": "application/vnd.google-apps.document",
+      "content": "# Authentication\nRotate the juniper credential after an OAuth incident. Preserve the audit event.\n## Worker recovery\nA worker reclaims an expired lease using the amber heartbeat rule. It must not repeat completed writes.\n## Rollback\nThe violet rollback marker returns new runs to the legacy route."
+    },
+    "queries": [
+      {"query": "expired lease heartbeat", "required_terms": ["amber", "heartbeat"]},
+      {"query": "OAuth credential rotation", "required_terms": ["juniper", "credential"]}
+    ]
+  },
+  {
+    "id": "pdf-layout-and-table",
+    "source_type": "pdf",
+    "item": {
+      "pages": [{
+        "page_number": 4,
+        "blocks": [{"heading": "Incident", "text": "The quartz breaker opened after seven failures.", "bbox": [0, 0, 200, 80], "column": 1}],
+        "tables": [{"bbox": [0, 100, 400, 260], "rows": [["Signal", "Threshold"], ["orchid queue", "25"]]}]
+      }]
+    },
+    "queries": [
+      {"query": "quartz breaker failures", "required_terms": ["quartz", "breaker"]},
+      {"query": "orchid queue threshold", "required_terms": ["orchid", "threshold"]}
+    ]
+  },
+  {
+    "id": "sheet-row-groups",
+    "source_type": "sheets",
+    "item": {
+      "sheet_name": "Pilot",
+      "values": [["Cohort", "Status", "Marker"], ["alpha", "ready", "saffron"], ["beta", "paused", "indigo"]]
+    },
+    "queries": [
+      {"query": "beta indigo", "required_terms": ["beta", "indigo"]}
+    ]
+  },
+  {
+    "id": "meet-speaker-turns",
+    "source_type": "meet_transcript",
+    "item": {
+      "conference_id": "meet-pilot",
+      "turns": [
+        {"speaker": "Asha", "text": "The marigold experiment remains offline."},
+        {"speaker": "Ben", "text": "Promotion requires the silver verifier report."}
+      ]
+    },
+    "queries": [
+      {"query": "marigold experiment", "required_terms": ["marigold", "offline"]},
+      {"query": "silver verifier", "required_terms": ["silver", "verifier"]}
+    ]
+  },
+  {
+    "id": "calendar-no-chunk",
+    "source_type": "calendar",
+    "item": {
+      "title": "Cedar pilot review",
+      "start_time": "2026-07-21T10:00:00+05:30",
+      "end_time": "2026-07-21T10:30:00+05:30",
+      "attendees": ["pilot@example.test"],
+      "meet_link": "https://meet.example.test/cedar"
+    },
+    "queries": [
+      {"query": "cedar pilot review", "required_terms": ["cedar", "pilot"]}
+    ]
+  }
+]
