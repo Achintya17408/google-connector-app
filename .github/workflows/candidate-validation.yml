@@ -102,7 +102,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: candidate-backend-log
+      - name: Detect a governed candidate manifest
+        id: candidate
+        run: |
+          count="$(find .improvement-proposals -maxdepth 1 -type f -name '*.candidate.json' 2>/dev/null | wc -l | tr -d ' ')"
+          test "$count" -le 1
+          if test "$count" = 1; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Submit trusted validation attestation only after every candidate gate
+        if: steps.candidate.outputs.present == 'true'
         env:
           CANDIDATE_ATTESTATION_URL: ${{ secrets.CANDIDATE_ATTESTATION_URL }}
           CANDIDATE_CI_ATTESTATION_TOKEN: ${{ secrets.CANDIDATE_CI_ATTESTATION_TOKEN }}
