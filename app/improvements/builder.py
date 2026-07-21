@@ -20,11 +20,14 @@ from app.improvements.builder_tools import BoundedRepositoryTools
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_POLICY_VERSION = "adaptive-roles-v1"
-TOOL_POLICY_VERSION = "bounded-repo-tools-v3-plain-json-recovery"
+TOOL_POLICY_VERSION = "bounded-repo-tools-v4-quota-aware-turns"
 BUILDER_HISTORY_MAX_CHARS = 24_000
 BUILDER_413_RETRY_MAX_CHARS = 12_000
 BUILDER_AUTHOR_MAX_ROUNDS = 8
 BUILDER_REVIEWER_MAX_ROUNDS = 5
+BUILDER_TOOL_TURN_MAX_TOKENS = 2_048
+BUILDER_FINAL_TURN_MAX_TOKENS = 4_096
+BUILDER_QUOTA_RETRY_MAX_TOKENS = 1_024
 
 
 def candidate_model_order(job: dict) -> list[str]:
@@ -144,6 +147,7 @@ async def _candidate_completion(
             # tools close for final candidate serialization.
             request_kwargs.pop("response_format", None)
         retried_short_limit = False
+        retried_quota_fit = False
         retried_oversize = False
         retried_tool_generation = False
         retried_json_generation = False
@@ -166,6 +170,20 @@ async def _candidate_completion(
                 if not retried_short_limit and 0 < retry_after <= 30:
                     retried_short_limit = True
                     await asyncio.sleep(retry_after)
+                    continue
+                current_max = int(request_kwargs.get("max_tokens") or 0)
+                if not retried_quota_fit and current_max > BUILDER_QUOTA_RETRY_MAX_TOKENS:
+                    # Free-tier TPD accounting can reject a large requested completion
+                    # even when a small patch still fits. Retry once with compact input
+                    # and a small output reservation before advancing the allowlist.
+                    retried_quota_fit = True
+                    request_kwargs = dict(request_kwargs)
+                    request_kwargs["max_tokens"] = BUILDER_QUOTA_RETRY_MAX_TOKENS
+                    if request_kwargs.get("messages"):
+                        request_kwargs["messages"] = _fit_builder_history(
+                            request_kwargs["messages"],
+                            max_chars=BUILDER_413_RETRY_MAX_CHARS,
+                        )
                     continue
                 break
             except APIStatusError as exc:
@@ -457,6 +475,7 @@ async def _groq_json(
         messages=[{"role": "user", "content": _candidate_prompt(job, sources, role)}],
         temperature=0.1,
         max_tokens=min(
+            BUILDER_FINAL_TURN_MAX_TOKENS,
             settings.candidate_builder_max_output_tokens,
             effective_builder_token_budget(job),
         ),
@@ -532,7 +551,11 @@ async def _groq_tool_json(
             })
             response, model, _ = await _candidate_completion(
                 client, job, messages=final_messages, temperature=0.1,
-                max_tokens=min(settings.candidate_builder_max_output_tokens, remaining),
+                max_tokens=min(
+                    BUILDER_FINAL_TURN_MAX_TOKENS,
+                    settings.candidate_builder_max_output_tokens,
+                    remaining,
+                ),
                 response_format={"type": "json_object"},
             )
             json_tool_protocol = True
@@ -540,7 +563,11 @@ async def _groq_tool_json(
             response, model, json_tool_protocol = await _candidate_completion(
                 client, job, messages=messages,
                 tools=tools.schemas(), tool_choice="auto", temperature=0.1,
-                max_tokens=min(settings.candidate_builder_max_output_tokens, remaining),
+                max_tokens=min(
+                    BUILDER_TOOL_TURN_MAX_TOKENS,
+                    settings.candidate_builder_max_output_tokens,
+                    remaining,
+                ),
                 json_tool_protocol=json_tool_protocol,
             )
         if model not in models_used:

@@ -237,6 +237,38 @@ def test_candidate_builder_reaches_final_20b_fallback(monkeypatch):
         get_settings.cache_clear()
 
 
+def test_candidate_builder_retries_large_quota_reservation_with_small_ceiling(monkeypatch):
+    from groq import RateLimitError
+
+    requests = []
+
+    class Completions:
+        async def create(self, *, model, **kwargs):
+            requests.append(kwargs)
+            if len(requests) == 1:
+                response = httpx.Response(
+                    429, headers={"retry-after": "3600"},
+                    request=httpx.Request("POST", "https://api.groq.com/test"),
+                )
+                raise RateLimitError("daily reservation limit", response=response, body=None)
+            return SimpleNamespace(model=model)
+
+    monkeypatch.setenv("CANDIDATE_BUILDER_FALLBACK_MODELS", "")
+    get_settings.cache_clear()
+    try:
+        client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+        _, model, _ = asyncio.run(_candidate_completion(
+            client, {"model_name": "llama-3.3-70b-versatile"},
+            messages=[{"role": "user", "content": "bounded patch"}],
+            max_tokens=6_000,
+        ))
+        assert model == "llama-3.3-70b-versatile"
+        assert requests[0]["max_tokens"] == 6_000
+        assert requests[1]["max_tokens"] == 1_024
+    finally:
+        get_settings.cache_clear()
+
+
 def test_candidate_builder_omits_json_mode_only_for_gpt_oss_tool_turns(monkeypatch):
     calls = []
 
