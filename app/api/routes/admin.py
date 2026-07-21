@@ -128,7 +128,12 @@ async def candidate_builder_input(build_id: str):
         row = await conn.fetchrow(
             """SELECT b.*,p.proposal_key,p.risk_level FROM candidate_builds b
                JOIN improvement_proposals p ON p.id=b.proposal_id
-               WHERE b.id=$1 AND b.status IN ('queued','investigating') FOR UPDATE""",
+               WHERE b.id=$1 AND (
+                 b.status IN ('queued','investigating') OR (
+                   b.status='failed' AND b.candidate_commit IS NULL AND
+                   b.checkpoint#>>'{last_runner_failure,error_type}'='APIStatusError'
+                 )
+               ) FOR UPDATE""",
             build_id,
         )
         if not row:
