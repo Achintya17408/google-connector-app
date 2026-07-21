@@ -110,12 +110,18 @@ async def _candidate_completion(
     if protocol_mode:
         kwargs = _json_tool_protocol_kwargs(kwargs)
     for model in candidate_model_order(job):
+        request_kwargs = dict(kwargs)
+        if model == "qwen/qwen3-32b":
+            request_kwargs["temperature"] = 0.6
+            request_kwargs["reasoning_format"] = "hidden"
         retried_short_limit = False
         retried_oversize = False
         retried_tool_generation = False
         for _ in range(4):
             try:
-                response = await client.chat.completions.create(model=model, **kwargs)
+                response = await client.chat.completions.create(
+                    model=model, **request_kwargs,
+                )
                 return response, model, protocol_mode
             except RateLimitError as exc:
                 last_error = exc
@@ -134,27 +140,30 @@ async def _candidate_completion(
                 break
             except APIStatusError as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
-                if status == 413 and not retried_oversize and kwargs.get("messages"):
+                if status == 413 and not retried_oversize and request_kwargs.get("messages"):
                     retried_oversize = True
-                    kwargs = dict(kwargs)
-                    kwargs["messages"] = _fit_builder_history(
-                        kwargs["messages"], max_chars=BUILDER_413_RETRY_MAX_CHARS,
+                    request_kwargs = dict(request_kwargs)
+                    request_kwargs["messages"] = _fit_builder_history(
+                        request_kwargs["messages"], max_chars=BUILDER_413_RETRY_MAX_CHARS,
                     )
-                    kwargs["max_tokens"] = min(int(kwargs.get("max_tokens") or 2048), 2048)
+                    request_kwargs["max_tokens"] = min(
+                        int(request_kwargs.get("max_tokens") or 2048), 2048,
+                    )
                     continue
                 if status == 400 and not retried_tool_generation and is_tool_generation_failure(exc):
                     retried_tool_generation = True
-                    kwargs = dict(kwargs)
-                    kwargs["temperature"] = 0.0
-                    kwargs["parallel_tool_calls"] = False
-                    kwargs["disable_tool_validation"] = True
+                    request_kwargs = dict(request_kwargs)
+                    request_kwargs["temperature"] = 0.0
+                    request_kwargs["parallel_tool_calls"] = False
+                    request_kwargs["disable_tool_validation"] = True
                     continue
                 if status == 400 and is_tool_generation_failure(exc) and not protocol_mode:
                     # Some Groq models repeatedly fail while serializing a native tool
                     # call. Preserve the same local authority boundary while removing
                     # provider tool syntax from the generation path.
                     protocol_mode = True
-                    kwargs = _json_tool_protocol_kwargs(kwargs)
+                    kwargs = _json_tool_protocol_kwargs(request_kwargs)
+                    request_kwargs = kwargs
                     continue
                 raise
     assert last_error is not None
