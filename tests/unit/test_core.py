@@ -297,6 +297,7 @@ def test_candidate_builder_retries_only_groq_failed_tool_generation(monkeypatch)
         assert model == "openai/gpt-oss-120b"
         assert requests[1]["temperature"] == 0.0
         assert requests[1]["parallel_tool_calls"] is False
+        assert requests[1]["disable_tool_validation"] is True
         assert is_tool_generation_failure(RuntimeError("unrelated")) is False
     finally:
         get_settings.cache_clear()
