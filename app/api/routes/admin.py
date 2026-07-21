@@ -131,8 +131,12 @@ async def candidate_builder_input(build_id: str):
                WHERE b.id=$1 AND (
                  b.status IN ('queued','investigating') OR (
                    b.status='failed' AND b.candidate_commit IS NULL AND
-                   b.checkpoint#>>'{last_runner_failure,error_type}' IN
-                     ('APIStatusError','RuntimeError','BadRequestError')
+                   (
+                     b.checkpoint#>>'{last_runner_failure,error_type}' IN
+                       ('APIStatusError','RuntimeError','BadRequestError')
+                     OR b.checkpoint#>>'{last_runner_failure,error_type}'=
+                        'tool_token_budget_exhausted'
+                   )
                  )
                ) FOR UPDATE""",
             build_id,
