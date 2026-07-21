@@ -137,6 +137,11 @@ async def candidate_builder_input(build_id: str):
                         'history_budget_exhausted')
                      OR b.checkpoint#>>'{last_runner_failure,error_type}' IN
                         ('tool_token_budget_exhausted','tool_round_limit_exhausted')
+                     OR (
+                       b.checkpoint#>>'{last_runner_failure,stage}'='submission' AND
+                       b.checkpoint#>>'{last_runner_failure,error_type}'='HTTPStatusError' AND
+                       b.error_message='Candidate callback returned HTTP 422 during submission.'
+                     )
                    )
                  )
                ) FOR UPDATE""",
