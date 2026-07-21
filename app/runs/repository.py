@@ -14,6 +14,10 @@ class RunLimitExceeded(RuntimeError):
     pass
 
 
+class CandidateAssignmentMismatch(RuntimeError):
+    pass
+
+
 def _json(value):
     return json.dumps(value, default=str)
 
@@ -30,7 +34,8 @@ async def append_event(pool, run_id, user_id, event_type, *, step_id=None,
         )
 
 
-async def create_run(pool, user_id, message, session_id, idempotency_key=None):
+async def create_run(pool, user_id, message, session_id, idempotency_key=None,
+                     required_executor_version: str | None = None):
     settings = get_settings()
     if len(message) > settings.max_request_chars:
         raise RunLimitExceeded(
@@ -145,6 +150,13 @@ async def create_run(pool, user_id, message, session_id, idempotency_key=None):
             assignment = await resolve_executor_assignment(
                 conn, user_id, settings.deployment_version, plan.model_dump(),
             )
+            if required_executor_version and (
+                assignment.cohort != "candidate"
+                or assignment.executor_version != required_executor_version
+            ):
+                raise CandidateAssignmentMismatch(
+                    "The candidate assertion no longer matches the durable routing decision"
+                )
             run = await conn.fetchrow(
                 """INSERT INTO agent_runs
                    (session_id,user_id,request,objective,status,current_phase,plan,

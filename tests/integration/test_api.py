@@ -18,7 +18,10 @@ def test_health_auth_and_route_protection(caplog):
 
     with TestClient(app) as client:
         health = client.get("/health", headers={"X-Request-ID": "integration-request-123"})
-        assert health.json() == {"status": "ok"}
+        assert health.json()["status"] == "ok"
+        assert health.json()["executor_role"] in {"control", "candidate"}
+        assert "deployment_version" in health.json()
+        assert "executor_version" in health.json()
         assert health.headers["x-request-id"] == "integration-request-123"
         assert any(
             '"request_id":"integration-request-123"' in record.message

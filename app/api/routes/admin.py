@@ -28,8 +28,8 @@ from app.improvements.publisher import (
     promote_candidate_pr,
 )
 from app.improvements.candidates import (
-    candidate_digest, file_digest, validate_candidate_files,
-    worker_canary_incompatible_paths,
+    candidate_digest, candidate_runtime_surfaces, file_digest,
+    unsupported_candidate_surfaces, validate_candidate_files,
 )
 from app.improvements.builder import store_candidate_draft
 from app.okf.candidates import stage_okf_candidate_bundle
@@ -201,6 +201,7 @@ async def attest_candidate_build(build_id: str, body: CandidateValidationAttesta
         manifest_patch = {
             "candidate_commit": body.commit_sha, "candidate_tree": body.tree_sha,
             "canary_eligible": True,
+            "runtime_surfaces": candidate_runtime_surfaces(digest_files),
         }
         okf_files = [
             item for item in digest_files if item["path"].startswith("knowledge/")
@@ -554,15 +555,24 @@ async def attest_candidate_deployment(
             "SELECT path FROM improvement_candidate_files WHERE proposal_id=$1",
             proposal["id"],
         )
-        incompatible = worker_canary_incompatible_paths(
+        incompatible = unsupported_candidate_surfaces(
             [{"path": row["path"]} for row in candidate_paths]
         )
         if incompatible:
             raise HTTPException(
                 409,
-                "This candidate changes a non-worker runtime surface and cannot be isolated by the "
-                f"worker-only canary target: {', '.join(incompatible)}",
+                "This candidate requires an isolated frontend preview/router that is not "
+                f"configured: {', '.join(incompatible)}",
             )
+        manifest = _json_object(proposal["candidate_manifest"])
+        expected_surfaces = sorted(manifest.get("runtime_surfaces") or ["worker"])
+        if sorted(body.runtime_surfaces) != expected_surfaces:
+            raise HTTPException(409, "Deployment runtime surfaces do not match the frozen candidate")
+        if "api" in expected_surfaces:
+            if not body.deployment_url or not body.deployment_url.startswith("https://"):
+                raise HTTPException(409, "API candidates require a verified HTTPS candidate URL")
+        elif body.deployment_url:
+            raise HTTPException(409, "Worker-only candidates must not expose a public URL")
         evidence = {
             **body.model_dump(),
             "trusted_identity": f"github-actions:{settings.github_proposal_repository}:{body.workflow}",
@@ -919,6 +929,30 @@ async def decide_canary(proposal_key: str, body: ImprovementDecision, request: R
                 "applicability"
             ) or {}
             manifest = _json_object(proposal["candidate_manifest"])
+            if body.decision == "approved" and proposal["candidate_kind"] == "code":
+                files = await conn.fetch(
+                    "SELECT path FROM improvement_candidate_files WHERE proposal_id=$1",
+                    proposal["id"],
+                )
+                unsupported = unsupported_candidate_surfaces(
+                    [{"path": row["path"]} for row in files]
+                )
+                if unsupported:
+                    raise HTTPException(
+                        409, "Candidate requires an unconfigured isolated runtime: "
+                        + ", ".join(unsupported),
+                    )
+                competing = await conn.fetchval(
+                    """SELECT count(*) FROM improvement_canaries c
+                       JOIN improvement_proposals p ON p.id=c.proposal_id
+                       WHERE p.candidate_kind='code' AND c.proposal_id<>$1
+                         AND c.status IN ('pending','active','passed')""",
+                    proposal["id"],
+                )
+                if competing:
+                    raise HTTPException(
+                        409, "Another code candidate owns the isolated canary runtime",
+                    )
             rag_modes = set(applicability.get("rag_modes") or [])
             if (
                 body.decision == "approved" and manifest.get("okf_bundle_hash")

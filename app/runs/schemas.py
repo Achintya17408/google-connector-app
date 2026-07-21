@@ -125,6 +125,10 @@ class CandidateDeploymentAttestation(BaseModel):
     run_id: str = Field(min_length=1, max_length=100)
     image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    runtime_surfaces: list[Literal["api", "worker", "registry"]] = Field(
+        min_length=1, max_length=3,
+    )
+    deployment_url: str | None = Field(default=None, max_length=2_000)
     smoke_tests: dict[str, Any]
     verified: bool
 

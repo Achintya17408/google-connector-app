@@ -8,6 +8,9 @@ on:
       candidate_version:
         description: Exact validated 40-character commit SHA
         required: true
+      runtime_surfaces:
+        description: Frozen comma-separated runtime surfaces
+        required: true
 
 permissions:
   contents: read
@@ -32,23 +35,33 @@ jobs:
           --environment production
           --service "$RAILWAY_CANDIDATE_WORKER_SERVICE"
           --json >/dev/null
-      - name: Pin candidate worker and deploy its exact source
+      - name: Pin candidate runtime and deploy its exact source
         run: |
           region="${RAILWAY_CANDIDATE_REGION:-southeast-asia}"
           printf '%s' '${{ inputs.candidate_version }}' | npx -y @railway/cli@latest variable set EXECUTOR_VERSION --stdin --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --skip-deploys >/dev/null
           printf '%s' '${{ inputs.candidate_version }}' | npx -y @railway/cli@latest variable set DEPLOYMENT_VERSION --stdin --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --skip-deploys >/dev/null
           printf '%s' 'candidate' | npx -y @railway/cli@latest variable set EXECUTOR_ROLE --stdin --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --skip-deploys >/dev/null
+          printf '%s' 'Dockerfile.candidate' | npx -y @railway/cli@latest variable set RAILWAY_DOCKERFILE_PATH --stdin --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --skip-deploys >/dev/null
+          printf '%s' 'true' | npx -y @railway/cli@latest variable set EMBEDDED_WORKER_ENABLED --stdin --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --skip-deploys >/dev/null
+          printf '%s' 'false' | npx -y @railway/cli@latest variable set GOVERNED_IMPROVEMENTS_ENABLED --stdin --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --skip-deploys >/dev/null
           npx -y @railway/cli@latest up --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --detach --yes
           npx -y @railway/cli@latest scale --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" "${region}=1" --json >/dev/null
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_CANDIDATE_WORKER_SERVICE: ${{ secrets.RAILWAY_CANDIDATE_WORKER_SERVICE }}
           RAILWAY_CANDIDATE_REGION: ${{ vars.RAILWAY_CANDIDATE_REGION }}
+      - name: Restrict candidate networking to its required surfaces
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_CANDIDATE_WORKER_SERVICE: ${{ secrets.RAILWAY_CANDIDATE_WORKER_SERVICE }}
+          CANDIDATE_RUNTIME_SURFACES: ${{ inputs.runtime_surfaces }}
+        run: python scripts/configure_candidate_domain.py
       - name: Wait for candidate worker deployment
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_CANDIDATE_WORKER_SERVICE: ${{ secrets.RAILWAY_CANDIDATE_WORKER_SERVICE }}
           CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+          CANDIDATE_RUNTIME_SURFACES: ${{ inputs.runtime_surfaces }}
         run: python scripts/wait_candidate_deployment.py
       - name: Register trusted deployment evidence
         env:
@@ -60,4 +73,5 @@ jobs:
           CANDIDATE_VERSION: ${{ inputs.candidate_version }}
           WORKFLOW_NAME: ${{ github.workflow }}
           RUN_ID: ${{ github.run_id }}
+          CANDIDATE_RUNTIME_SURFACES: ${{ inputs.runtime_surfaces }}
         run: python scripts/submit_candidate_deployment.py

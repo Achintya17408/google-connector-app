@@ -40,9 +40,11 @@ async def lifespan(app):
         os.environ["LANGCHAIN_API_KEY"] = langsmith_key
         os.environ["LANGSMITH_API_KEY"] = langsmith_key
     pool=await get_pool()
-    if settings.okf_enabled:
+    is_candidate = settings.executor_role == "candidate"
+    if settings.okf_enabled and not is_candidate:
         await sync_bundle(pool)
-    setup_scheduler(pool,NomicEmbedder())
+    if not is_candidate:
+        setup_scheduler(pool,NomicEmbedder())
     # A single long-lived connection is unsafe with serverless Postgres providers
     # such as Neon: the provider may retire it while the Railway process stays up.
     # The pool validates borrowed connections and transparently replaces stale ones.
@@ -62,24 +64,33 @@ async def lifespan(app):
         worker_stop = asyncio.Event()
         retention_stop = asyncio.Event()
         worker_task = None
-        retention_task = asyncio.create_task(retention_loop(pool, retention_stop))
-        embedding_task = asyncio.create_task(embedding_worker_loop(pool, retention_stop))
+        retention_task = None if is_candidate else asyncio.create_task(retention_loop(pool, retention_stop))
+        embedding_task = None if is_candidate else asyncio.create_task(embedding_worker_loop(pool, retention_stop))
         improvement_task = asyncio.create_task(
             improvement_analysis_loop(pool, retention_stop)
-        ) if settings.governed_improvements_enabled else None
-        metrics_task = asyncio.create_task(metrics_collection_loop(pool, retention_stop))
+        ) if settings.governed_improvements_enabled and not is_candidate else None
+        metrics_task = None if is_candidate else asyncio.create_task(metrics_collection_loop(pool, retention_stop))
         if settings.durable_runs_enabled and settings.embedded_worker_enabled:
             worker_task = asyncio.create_task(worker_loop(app, pool, worker_stop))
+        if is_candidate:
+            print(
+                "candidate_runtime_ready role=candidate "
+                f"executor_version={settings.executor_version} surfaces=api,worker",
+                flush=True,
+            )
         yield
         worker_stop.set()
         retention_stop.set()
         if worker_task:
             await worker_task
-        await retention_task
-        await embedding_task
+        if retention_task:
+            await retention_task
+        if embedding_task:
+            await embedding_task
         if improvement_task:
             await improvement_task
-        await metrics_task
+        if metrics_task:
+            await metrics_task
     if scheduler.running:
         scheduler.shutdown(wait=False)
     await close_pool()
@@ -104,7 +115,13 @@ app.middleware("http")(metrics_middleware)
 app.include_router(auth_router); app.include_router(chat.router); app.include_router(runs.router); app.include_router(runs.sessions_router); app.include_router(feedback.router); app.include_router(history.router); app.include_router(admin.router)
 app.mount("/metrics",make_asgi_app())
 @app.get("/health")
-async def health(): return {"status":"ok"}
+async def health():
+    settings = get_settings()
+    return {
+        "status": "ok", "deployment_version": settings.deployment_version,
+        "executor_version": settings.executor_version,
+        "executor_role": settings.executor_role,
+    }
 
 
 @app.get("/monitoring/metrics", include_in_schema=False)

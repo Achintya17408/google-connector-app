@@ -8,6 +8,8 @@ with open("candidate-deployment.json", encoding="utf-8") as handle:
     status = json.load(handle)
 deployment = status.get("latestDeployment") or status
 meta = deployment.get("meta") or {}
+with open("candidate-domain.json", encoding="utf-8") as handle:
+    domain = json.load(handle)
 payload = {
     "candidate_version": os.environ["CANDIDATE_VERSION"],
     "deployment_id": deployment["id"],
@@ -16,11 +18,13 @@ payload = {
     "workflow": os.environ["WORKFLOW_NAME"], "run_id": os.environ["RUN_ID"],
     "image_digest": meta["imageDigest"],
     "source_commit": meta["commitHash"],
+    "runtime_surfaces": domain["runtime_surfaces"],
+    "deployment_url": domain["deployment_url"],
     "smoke_tests": {"passed": True, "checks": [
         "Railway deployment reached SUCCESS with a RUNNING instance",
         "source commit and executor version are pinned",
-        "candidate worker emitted version-bound readiness",
-        "worker has no public domain",
+        "candidate runtime emitted version-bound readiness",
+        "API health is version-bound when an API surface is present",
     ]},
     "verified": True,
 }

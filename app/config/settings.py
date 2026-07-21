@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     railway_project_id: str = ""
     railway_candidate_project_id: str = ""
     railway_candidate_worker_service: str = "google-connector-app"
+    candidate_api_request_timeout_seconds: float = 20.0
     candidate_worker_rag_enabled: bool = False
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     neon_database_url: str = ""

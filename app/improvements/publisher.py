@@ -158,11 +158,13 @@ async def dispatch_candidate_deployment(proposal: dict) -> dict:
         "X-GitHub-Api-Version": "2026-03-10",
     }
     async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        manifest = proposal.get("candidate_manifest") or {}
         response = await client.post(url, json={
             "ref": "main",
             "inputs": {
                 "proposal_key": proposal["proposal_key"],
                 "candidate_version": proposal["candidate_version"],
+                "runtime_surfaces": ",".join(manifest.get("runtime_surfaces") or []),
             },
         })
         response.raise_for_status()

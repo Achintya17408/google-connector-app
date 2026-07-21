@@ -13,7 +13,8 @@ from app.mlops.ragas_eval import _context_text, _retrieved_contexts
 from scripts.run_ragas_eval import _score_payload
 from scripts.sync_grafana_dashboards import build_dashboard_payload
 from app.improvements.candidates import (
-    infer_candidate_kind, worker_canary_incompatible_paths,
+    candidate_runtime_surfaces, infer_candidate_kind,
+    unsupported_candidate_surfaces, worker_canary_incompatible_paths,
 )
 from app.improvements.routing import candidate_applies
 from app.improvements.analyzer import _json_object, _number
@@ -72,6 +73,9 @@ from app.improvements.failure_intelligence import (
 from app.api.middleware.metrics import _correlation_id, _route_template
 from app.mlops.tracing import _headers as otlp_headers, _logs_endpoint, _trace_endpoint
 from types import SimpleNamespace
+from app.improvements.network_guard import allowlisted_dns
+import socket
+from app.improvements.canary_simulator import SimulatedRun, simulate_claims, simulate_rollback
 
 def test_context_packer_orders_by_score():
     text = pack_context([
@@ -79,6 +83,39 @@ def test_context_packer_orders_by_score():
         {"source": "high", "content": "first", "score": 0.9},
     ])
     assert text.index("first") < text.index("second")
+
+
+def test_candidate_runtime_surfaces_are_explicit_and_frontend_is_blocked():
+    files = [
+        {"path": "app/runs/planner.py"},
+        {"path": "app/agents/supervisor.py"},
+        {"path": "web/app/page.tsx"},
+        {"path": "tests/unit/test_core.py"},
+    ]
+    assert candidate_runtime_surfaces(files) == ["api", "frontend", "worker"]
+    assert unsupported_candidate_surfaces(files) == ["frontend"]
+    assert candidate_runtime_surfaces([{"path": "knowledge/README.md"}]) == ["registry"]
+
+
+def test_candidate_builder_dns_guard_denies_unknown_hosts(monkeypatch):
+    original = socket.getaddrinfo
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *args, **kwargs: [(host,)])
+    with allowlisted_dns({"api.groq.com"}):
+        assert socket.getaddrinfo("api.groq.com") == [("api.groq.com",)]
+        with pytest.raises(PermissionError):
+            socket.getaddrinfo("example.com")
+    # The context restores whatever resolver was active at entry.
+    assert socket.getaddrinfo is not original
+
+
+def test_dual_worker_simulation_has_no_double_claim_and_sticky_rollback():
+    runs = [SimulatedRun("a", "control"), SimulatedRun("b", "candidate")]
+    assert simulate_claims(runs, "control", "candidate") == {
+        "control": ["a"], "candidate": ["b"], "overlap": [], "safe": True,
+    }
+    rolled = simulate_rollback(runs, "control")
+    assert rolled[1].executor_version == "candidate"
+    assert rolled[-1].executor_version == "control"
 
 
 def test_quantized_dp_can_outperform_greedy_context_packing():

@@ -48,6 +48,7 @@ jobs:
           python scripts/run_policy_evals.py 2>&1 | tee -a candidate-tests.log
           python scripts/run_context_packing_evals.py 2>&1 | tee -a candidate-tests.log
           python scripts/run_dp_allocation_evals.py 2>&1 | tee -a candidate-tests.log
+          python scripts/run_dual_worker_simulation.py 2>&1 | tee -a candidate-tests.log
           python -m compileall -q app
           python -m flake8 app scripts tests migrations
           bandit -q -r app scripts -ll
@@ -56,6 +57,7 @@ jobs:
           alembic upgrade 013
           test "$(alembic current | tail -1)" = "013 (head)"
           docker build -f Dockerfile.worker -t candidate-worker:test .
+          docker build -f Dockerfile.candidate -t candidate-api:test .
           docker build -f Dockerfile.builder -t candidate-builder:test .
       - uses: actions/upload-artifact@v4
         with:

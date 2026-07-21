@@ -81,3 +81,25 @@ def worker_canary_incompatible_paths(files: list[dict]) -> list[str]:
             continue
         incompatible.append(path)
     return sorted(incompatible)
+
+
+def candidate_runtime_surfaces(files: list[dict]) -> list[str]:
+    """Classify immutable files into the runtime surfaces a canary must exercise."""
+    surfaces = set()
+    for item in files:
+        path = item.get("path", "")
+        if path.startswith("web/") or path.startswith("mobile/"):
+            surfaces.add("frontend")
+        elif path.startswith("app/api/") or path in {
+            "app/api/main.py", "app/runs/planner.py", "app/runs/repository.py",
+        }:
+            surfaces.add("api")
+        elif path.startswith("app/"):
+            surfaces.add("worker")
+    return sorted(surfaces or {"registry"})
+
+
+def unsupported_candidate_surfaces(files: list[dict]) -> list[str]:
+    """Frontend binaries still require an isolated preview router."""
+    return [surface for surface in candidate_runtime_surfaces(files)
+            if surface == "frontend"]

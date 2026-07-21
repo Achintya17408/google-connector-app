@@ -550,7 +550,7 @@ their category; a multi-service unbounded-result theme requires at least two spe
 
 ### Epic 30.3 — Isolated candidate workspace and evidence
 
-- [~] Run candidate builds in disposable GitHub checkouts with no production
+- [x] Run candidate builds in disposable GitHub checkouts with no production
   OAuth/database/deployment credentials, allowlisted network, resource/time limits,
   approved path roots, secret/PII scans, and complete sanitized audit events.
 - [x] Generate concrete files, content hashes, exact diff, base/candidate commit, validation
@@ -586,7 +586,7 @@ create a production tool, deploy, approve, or publish.
 
 - [x] Build immutable candidate images/artifacts from trusted CI; record source commit,
   digest, service/deployment IDs, environment profile, health, smoke results, and expiry.
-- [~] Add a least-privilege Railway deployment adapter for isolated candidate workers and,
+- [x] Add a least-privilege Railway deployment adapter for isolated candidate workers and,
   only when required, candidate API/frontend surfaces; never alter control during preparation.
 - [x] Require human approval before production-connected deployment and separate human
   activation before assigning real runs.
@@ -601,7 +601,7 @@ create a production tool, deploy, approve, or publish.
   candidate deployment; database status alone is not rollback.
 - [x] Require human promotion after a passing measured canary, then deploy/merge the frozen
   candidate broadly and retain the last-known-good rollback path.
-- [~] Provide a deterministic dry-run/local dual-worker simulator before Railway mutation.
+- [x] Provide a deterministic dry-run/local dual-worker simulator before Railway mutation.
 
 Guardrail: canary activation demonstrably changes which immutable executor handles an
 eligible new run, and automatic rollback demonstrably restores control routing.

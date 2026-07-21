@@ -50,6 +50,8 @@ jobs:
         run: python scripts/run_context_packing_evals.py
       - name: Evaluate DP workflow and periodic quota allocation offline
         run: python scripts/run_dp_allocation_evals.py
+      - name: Prove control/candidate claims and rollback are disjoint
+        run: python scripts/run_dual_worker_simulation.py
       - name: Validate version-controlled Grafana dashboards
         run: python scripts/sync_grafana_dashboards.py
       - name: Verify migration downgrade and forward repair
