@@ -135,8 +135,8 @@ async def candidate_builder_input(build_id: str):
                      b.checkpoint#>>'{last_runner_failure,error_type}' IN
                        ('APIStatusError','RuntimeError','BadRequestError','NotFoundError',
                         'history_budget_exhausted')
-                     OR b.checkpoint#>>'{last_runner_failure,error_type}'=
-                        'tool_token_budget_exhausted'
+                     OR b.checkpoint#>>'{last_runner_failure,error_type}' IN
+                        ('tool_token_budget_exhausted','tool_round_limit_exhausted')
                    )
                  )
                ) FOR UPDATE""",

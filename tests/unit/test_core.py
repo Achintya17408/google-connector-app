@@ -467,6 +467,66 @@ def test_json_tool_protocol_still_executes_only_through_bounded_tools(monkeypatc
         get_settings.cache_clear()
 
 
+def test_candidate_builder_reserves_json_only_finalization_turns(monkeypatch, tmp_path):
+    requests = []
+
+    class Completions:
+        async def create(self, *, model, **kwargs):
+            requests.append(kwargs)
+            usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
+            if len(requests) == 11:
+                message = SimpleNamespace(
+                    content=json.dumps({
+                        "exact_diff": "bounded diff",
+                        "rollback_plan": {"action": "remove candidate"},
+                        "validation_commands": ["pytest -q tests/unit"],
+                    }),
+                    tool_calls=None,
+                )
+            else:
+                if len(requests) == 1:
+                    name = "stage_candidate_file"
+                    arguments = {
+                        "path": "tests/finalized_candidate.py",
+                        "change_type": "create", "content": "value = 1\n",
+                    }
+                else:
+                    name = "inspect_candidate_diff"
+                    arguments = {}
+                call = SimpleNamespace(
+                    id=f"call-{len(requests)}",
+                    function=SimpleNamespace(
+                        name=name, arguments=json.dumps(arguments),
+                    ),
+                )
+                message = SimpleNamespace(content="", tool_calls=[call])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)], usage=usage,
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    monkeypatch.setattr("app.improvements.builder.AsyncGroq", lambda **_: client)
+    monkeypatch.setenv("GROQ_API_KEY", "unit-test-key")
+    monkeypatch.setenv("CANDIDATE_BUILDER_FALLBACK_MODELS", "")
+    get_settings.cache_clear()
+    try:
+        candidate, tokens, _ = asyncio.run(_groq_tool_json(
+            {
+                "model_name": "qwen/qwen3.6-27b", "token_budget": 1_000,
+                "sanitized_input": {"title": "finalization test"},
+            },
+            BoundedRepositoryTools(tmp_path), "coordinator",
+        ))
+        assert candidate["files"][0]["path"] == "tests/finalized_candidate.py"
+        assert tokens == 22
+        assert "tools" in requests[9]
+        assert "tools" not in requests[10]
+        assert requests[10]["response_format"] == {"type": "json_object"}
+        assert "finalization_required" in requests[10]["messages"][-1]["content"]
+    finally:
+        get_settings.cache_clear()
+
+
 def test_candidate_reviewer_uses_manifest_and_bounded_staged_reads(tmp_path):
     tools = BoundedRepositoryTools(tmp_path)
     tools.stage("app/generated.py", "create", "line = 1\n" * 2_000)
