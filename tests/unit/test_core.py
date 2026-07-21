@@ -1,5 +1,6 @@
 import pytest
 import importlib
+import httpx
 from unittest.mock import MagicMock
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
@@ -76,6 +77,7 @@ from types import SimpleNamespace
 from app.improvements.network_guard import allowlisted_dns
 import socket
 from app.improvements.canary_simulator import SimulatedRun, simulate_claims, simulate_rollback
+from scripts.run_candidate_builder import failure_payload
 
 def test_context_packer_orders_by_score():
     text = pack_context([
@@ -118,6 +120,16 @@ def test_candidate_builder_normalizes_typed_contract_without_claiming_success():
         "action": "Remove added files", "automatic": False,
     }
     assert candidate["validation_commands"] == ["pytest tests/unit -q"]
+
+
+def test_candidate_builder_failure_payload_is_sanitized_and_retryable():
+    error = httpx.ConnectError("private upstream detail")
+    payload = failure_payload(error, "input")
+    assert payload == {
+        "stage": "input", "error_type": "ConnectError",
+        "message": "ConnectError during candidate input.",
+        "retryable": True, "retry_after_seconds": None,
+    }
 
 
 def test_dual_worker_simulation_has_no_double_claim_and_sticky_rollback():
