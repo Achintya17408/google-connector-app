@@ -237,6 +237,38 @@ def test_candidate_builder_reaches_final_20b_fallback(monkeypatch):
         get_settings.cache_clear()
 
 
+def test_candidate_builder_retries_large_quota_reservation_with_small_ceiling(monkeypatch):
+    from groq import RateLimitError
+
+    requests = []
+
+    class Completions:
+        async def create(self, *, model, **kwargs):
+            requests.append(kwargs)
+            if len(requests) == 1:
+                response = httpx.Response(
+                    429, headers={"retry-after": "3600"},
+                    request=httpx.Request("POST", "https://api.groq.com/test"),
+                )
+                raise RateLimitError("daily reservation limit", response=response, body=None)
+            return SimpleNamespace(model=model)
+
+    monkeypatch.setenv("CANDIDATE_BUILDER_FALLBACK_MODELS", "")
+    get_settings.cache_clear()
+    try:
+        client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+        _, model, _ = asyncio.run(_candidate_completion(
+            client, {"model_name": "llama-3.3-70b-versatile"},
+            messages=[{"role": "user", "content": "bounded patch"}],
+            max_tokens=6_000,
+        ))
+        assert model == "llama-3.3-70b-versatile"
+        assert requests[0]["max_tokens"] == 6_000
+        assert requests[1]["max_tokens"] == 1_024
+    finally:
+        get_settings.cache_clear()
+
+
 def test_candidate_builder_omits_json_mode_only_for_gpt_oss_tool_turns(monkeypatch):
     calls = []
 
@@ -1856,6 +1888,34 @@ def test_candidate_builder_tools_enforce_paths_calls_and_tool_authority(tmp_path
     fresh = BoundedRepositoryTools(tmp_path)
     with pytest.raises(ValueError):
         fresh.read("../outside.txt")
+
+
+def test_candidate_builder_can_validate_hash_and_rollback_staged_files(tmp_path):
+    (tmp_path / "app").mkdir()
+    tools = BoundedRepositoryTools(tmp_path, max_calls=20)
+    tools.execute("stage_candidate_file", {
+        "path": "app/valid.py", "change_type": "create", "content": "VALUE = 1\n",
+    })
+    manifest = tools.execute("inspect_candidate_manifest", {})
+    assert manifest["file_count"] == 1
+    assert len(manifest["files"][0]["sha256"]) == 64
+    assert tools.execute("validate_staged_candidate", {}) == {
+        "valid": True,
+        "checked": [{"path": "app/valid.py", "validator": "python_ast"}],
+        "errors": [],
+        "manifest": manifest,
+        "authority": "structural_only_trusted_ci_still_required",
+    }
+    tools.execute("stage_candidate_file", {
+        "path": "app/broken.py", "change_type": "create", "content": "if:\n",
+    })
+    invalid = tools.execute("validate_staged_candidate", {})
+    assert invalid["valid"] is False
+    assert invalid["errors"][0]["path"] == "app/broken.py"
+    assert invalid["errors"][0]["code"] == "python_ast_invalid"
+    discarded = tools.execute("discard_staged_candidate_file", {"path": "app/broken.py"})
+    assert discarded == {"discarded": "app/broken.py", "existed": True, "file_count": 1}
+    assert tools.execute("validate_staged_candidate", {})["valid"] is True
 
 
 def test_okf_candidate_rejects_reserved_concepts_and_escaping_links():
