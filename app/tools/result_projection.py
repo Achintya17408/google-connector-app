@@ -6,12 +6,10 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-import tiktoken
-
 from app.rag.context_packer import sanitize_untrusted_content
+from app.utils.tokenizer import token_count, truncate_tokens
 
 
-_TOKENIZER = tiktoken.get_encoding("cl100k_base")
 _IDENTIFIER_KEYS = {
     "id", "name", "messageId", "threadId", "fileId", "documentId",
     "spreadsheetId", "eventId", "taskId", "spaceId", "conferenceId",
@@ -50,7 +48,7 @@ def estimate_tokens(value: Any) -> int:
     rendered = value if isinstance(value, str) else json.dumps(
         value, sort_keys=True, separators=(",", ":"), default=str,
     )
-    return len(_TOKENIZER.encode(rendered))
+    return token_count(rendered)
 
 
 def _safe_text(value: Any, max_characters: int) -> tuple[str, bool]:
@@ -193,8 +191,7 @@ def _fit_token_limit(value: Any, max_tokens: int) -> tuple[Any, bool]:
         if selected:
             return selected, True
     rendered = value if isinstance(value, str) else json.dumps(value, default=str)
-    tokens = _TOKENIZER.encode(rendered)[:max_tokens]
-    return _TOKENIZER.decode(tokens).rstrip() + "…", True
+    return truncate_tokens(rendered, max_tokens).rstrip() + "…", True
 
 
 def project_tool_result(

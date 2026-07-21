@@ -153,19 +153,23 @@ async def analyze_cross_cluster_themes(pool) -> int:
         )]
     groups = {}
     for cluster in clusters:
-        if cluster["category"] == "model_context_length":
+        mechanism = cluster.get("mechanism") or "unknown"
+        component = (cluster.get("component") or "unknown").casefold()
+        if mechanism == "context_budget_overflow":
             theme = (
                 "unbounded-tool-context",
                 "Bound every tool-to-model data boundary",
                 "Several specific tool paths can exceed the provider context unless projection and preflight are universal.",
             )
-        elif cluster["category"] in {"rate_limit", "network"}:
+        elif mechanism in {"provider_quota", "transient_transport"}:
             theme = (
                 "transient-upstream-resilience",
                 "Make upstream interruption recovery idempotent",
                 "Repeated provider and network clusters require shared quota, retry, and resume policy.",
             )
-        elif cluster["category"] in {"planning", "execution"}:
+        elif mechanism == "planner_contract_rejection" or (
+            cluster["category"] == "planning" and "planner" in component
+        ):
             theme = (
                 "planner-tool-contract",
                 "Align planning and executable tool contracts",
@@ -290,18 +294,23 @@ async def analyze_recent_failure_categories_legacy(pool) -> int:
 
 
 async def expire_stale_proposals(pool) -> int:
-    async with pool.acquire() as conn:
-        result = await conn.execute(
+    from app.improvements.failure_intelligence import release_theme_for_proposal
+    async with pool.acquire() as conn, conn.transaction():
+        rows = await conn.fetch(
             """UPDATE improvement_proposals SET status='expired',updated_at=now()
                WHERE expires_at<now() AND status IN
-                 ('drafted','awaiting_review','changes_requested','approved_for_canary')"""
+                 ('drafted','awaiting_review','changes_requested','approved_for_canary')
+               RETURNING *"""
         )
-    return int(result.rsplit(" ", 1)[-1])
+        for proposal in rows:
+            await release_theme_for_proposal(conn, dict(proposal))
+    return len(rows)
 
 
 async def evaluate_active_canaries(pool) -> int:
     """Evaluate only measured, version-labelled runs; never manufacture a pass."""
     changed = 0
+    cleanup_requests: list[tuple[str, str]] = []
     async with pool.acquire() as conn:
         canaries = await conn.fetch(
             """SELECT * FROM improvement_canaries WHERE status='active'"""
@@ -388,6 +397,23 @@ async def evaluate_active_canaries(pool) -> int:
                            WHERE s.run_id=agent_runs.id AND s.status IN ('running','completed'))""",
                     canary["control_version"], canary["id"],
                 )
+                await conn.execute(
+                    """UPDATE okf_bundle_versions SET publication_status='rolled_back'
+                       WHERE bundle_hash=(SELECT candidate_manifest->>'okf_bundle_hash'
+                         FROM improvement_proposals WHERE id=$1)
+                         AND publication_status='canary'""",
+                    canary["proposal_id"],
+                )
+                retired = await conn.fetchrow(
+                    """SELECT proposal_key,candidate_kind FROM improvement_proposals
+                       WHERE id=$1""",
+                    canary["proposal_id"],
+                )
+                if retired and retired["candidate_kind"] == "code":
+                    cleanup_requests.append((
+                        retired["proposal_key"],
+                        "automatic measured canary rollback",
+                    ))
             await conn.execute(
                 "UPDATE improvement_proposals SET status=$1,updated_at=now() WHERE id=$2",
                 proposal_status, canary["proposal_id"],
@@ -412,6 +438,16 @@ async def evaluate_active_canaries(pool) -> int:
                 canary["proposal_id"], f"canary_{canary_status}", notification_payload,
             )
             changed += 1
+    if cleanup_requests:
+        from app.improvements.publisher import dispatch_candidate_cleanup
+        for proposal_key, reason in cleanup_requests:
+            try:
+                await dispatch_candidate_cleanup(proposal_key, reason)
+            except Exception as exc:
+                logger.warning(
+                    "Candidate cleanup dispatch failed proposal=%s error_type=%s",
+                    proposal_key, type(exc).__name__,
+                )
     return changed
 
 

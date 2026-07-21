@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 
-import tiktoken
+from app.utils.tokenizer import exact_tokenizer_available, token_count
 
 
 PROMPT_INJECTION_LINE = re.compile(
@@ -9,7 +9,6 @@ PROMPT_INJECTION_LINE = re.compile(
     r"(reveal|print|return).{0,30}(secret|token|password|system prompt)|"
     r"(send|upload|share).{0,40}(all files|credentials|tokens))"
 )
-TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
 
 @dataclass(frozen=True)
@@ -21,7 +20,7 @@ class PackingDecision:
 
 
 def _document_cost(document: dict) -> int:
-    return max(1, len(TOKENIZER.encode(str(document.get("content", "")))))
+    return token_count(str(document.get("content", "")))
 
 
 def _document_value(document: dict) -> float:
@@ -37,7 +36,7 @@ def select_context_documents(
 ) -> PackingDecision:
     """Select whole evidence items; DP is quantized knapsack, never live RL."""
     candidates = documents[:max_candidates]
-    if strategy != "dp" or not candidates:
+    if strategy != "dp" or not candidates or not exact_tokenizer_available():
         selected = []
         used = 0
         value = 0.0
@@ -48,7 +47,8 @@ def select_context_documents(
             selected.append(item)
             used += cost
             value += _document_value(item)
-        return PackingDecision(selected, "greedy", used, value)
+        fallback = "greedy_no_exact_tokenizer" if strategy == "dp" else "greedy"
+        return PackingDecision(selected, fallback, used, value)
     capacity = max(1, max_tokens // quantum)
     # State maps quantized cost to (value, selected indexes). This sparse form
     # avoids a large multi-dimensional table and remains bounded at 50 candidates.

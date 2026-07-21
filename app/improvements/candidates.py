@@ -5,7 +5,9 @@ import json
 import re
 
 
-ALLOWED_ROOTS = ("app/", "tests/", "knowledge/", "config/", "docs/", "web/")
+ALLOWED_ROOTS = (
+    "app/", "tests/", "knowledge/", "config/", "docs/", "web/", "mobile/",
+)
 FORBIDDEN_PARTS = (".env", "credentials", "oauth", "secret", "private_key")
 SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|authorization|refresh[_-]?token|client[_-]?secret)\s*[:=]"
@@ -54,3 +56,50 @@ def candidate_digest(
 
 def file_digest(content: str | None) -> str:
     return hashlib.sha256((content or "").encode()).hexdigest()
+
+
+def infer_candidate_kind(files: list[dict]) -> str:
+    """Pure knowledge overlays use the independently governed OKF lifecycle."""
+    paths = [item.get("path", "") for item in files]
+    return "okf" if paths and all(
+        path.startswith("knowledge/") and path.endswith(".md") for path in paths
+    ) else "code"
+
+
+def worker_canary_incompatible_paths(files: list[dict]) -> list[str]:
+    """Return runtime paths whose behavior cannot be exercised by a worker-only canary."""
+    neutral_prefixes = ("tests/", "docs/", "knowledge/")
+    worker_prefixes = (
+        "app/agents/", "app/tools/", "app/rag/", "app/okf/", "app/db/",
+        "app/config/", "app/runs/worker.py", "app/runs/verifier.py",
+        "app/runs/incident.py", "app/runs/informational.py", "app/evaluation/",
+    )
+    incompatible = []
+    for item in files:
+        path = item.get("path", "")
+        if path.startswith(neutral_prefixes) or path.startswith(worker_prefixes):
+            continue
+        incompatible.append(path)
+    return sorted(incompatible)
+
+
+def candidate_runtime_surfaces(files: list[dict]) -> list[str]:
+    """Classify immutable files into the runtime surfaces a canary must exercise."""
+    surfaces = set()
+    for item in files:
+        path = item.get("path", "")
+        if path.startswith("web/") or path.startswith("mobile/"):
+            surfaces.add("frontend")
+        elif path.startswith("app/api/") or path in {
+            "app/api/main.py", "app/runs/planner.py", "app/runs/repository.py",
+        }:
+            surfaces.add("api")
+        elif path.startswith("app/"):
+            surfaces.add("worker")
+    return sorted(surfaces or {"registry"})
+
+
+def unsupported_candidate_surfaces(files: list[dict]) -> list[str]:
+    """Frontend binaries still require an isolated preview router."""
+    return [surface for surface in candidate_runtime_surfaces(files)
+            if surface == "frontend"]

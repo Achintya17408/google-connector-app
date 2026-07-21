@@ -88,6 +88,10 @@ canary_routing = Gauge(
     "agent_canary_routing", "Governed canaries by routing and lifecycle state",
     ["status", "routing_enabled"],
 )
+okf_bundle_publications = Gauge(
+    "agent_okf_bundle_publications",
+    "Immutable OKF bundles by governed publication state", ["status"],
+)
 embedding_duration = Histogram(
     "agent_embedding_duration_seconds", "Ollama embedding latency", ["operation", "status"]
 )

@@ -66,6 +66,26 @@ groups:
         for: 5m
         labels: {severity: warning}
         annotations: {summary: "A failure-intelligence notification was not delivered"}
+      - alert: CandidateBuildFailed
+        expr: agent_candidate_builds{status="failed"} > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "A governed Groq candidate build failed before canary"}
+      - alert: CandidateCanaryRolledBack
+        expr: agent_canary_routing{status="rolled_back"} > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations: {summary: "A measured candidate canary was rolled back"}
+      - alert: OKFBundleRolledBack
+        expr: agent_okf_bundle_publications{status=~"rolled_back|rejected"} > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "A candidate OKF bundle was rejected or rolled back"}
+      - alert: ProductionPromotionPending
+        expr: agent_improvement_proposals{status="production_pending"} > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations: {summary: "A governed promotion is waiting for production attestation"}
       - alert: OllamaEmbeddingUnavailable
         expr: agent_ollama_model_loaded == 0
         for: 5m

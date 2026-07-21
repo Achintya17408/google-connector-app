@@ -158,15 +158,38 @@ async def dispatch_candidate_deployment(proposal: dict) -> dict:
         "X-GitHub-Api-Version": "2026-03-10",
     }
     async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        manifest = proposal.get("candidate_manifest") or {}
         response = await client.post(url, json={
             "ref": "main",
             "inputs": {
                 "proposal_key": proposal["proposal_key"],
                 "candidate_version": proposal["candidate_version"],
+                "runtime_surfaces": ",".join(manifest.get("runtime_surfaces") or []),
             },
         })
         response.raise_for_status()
     return {"workflow": "candidate-deploy.yml", "status": "dispatched"}
+
+
+async def dispatch_candidate_cleanup(proposal_key: str, reason: str) -> dict:
+    """Scale the isolated candidate executor down after rollback or promotion."""
+    settings = get_settings()
+    if not settings.github_proposal_token:
+        raise RuntimeError("GITHUB_PROPOSAL_TOKEN is not configured")
+    repository = settings.github_proposal_repository.strip("/")
+    url = f"https://api.github.com/repos/{repository}/actions/workflows/candidate-cleanup.yml/dispatches"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {settings.github_proposal_token}",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        response = await client.post(url, json={
+            "ref": "main",
+            "inputs": {"proposal_key": proposal_key, "reason": reason[:200]},
+        })
+        response.raise_for_status()
+    return {"workflow": "candidate-cleanup.yml", "status": "dispatched"}
 
 
 async def dispatch_candidate_builder(build_id: str) -> dict:

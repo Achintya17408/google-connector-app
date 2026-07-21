@@ -18,7 +18,10 @@ def test_health_auth_and_route_protection(caplog):
 
     with TestClient(app) as client:
         health = client.get("/health", headers={"X-Request-ID": "integration-request-123"})
-        assert health.json() == {"status": "ok"}
+        assert health.json()["status"] == "ok"
+        assert health.json()["executor_role"] in {"control", "candidate"}
+        assert "deployment_version" in health.json()
+        assert "executor_version" in health.json()
         assert health.headers["x-request-id"] == "integration-request-123"
         assert any(
             '"request_id":"integration-request-123"' in record.message
@@ -223,6 +226,186 @@ ultraviolet-private-knowledge-marker
         public, private = client.portal.call(verify)
         assert public == []
         assert private[0]["id"] == "private/confidential.md"
+
+
+def test_okf_candidate_is_staged_as_validated_immutable_overlay():
+    from app.api.main import app
+    from app.db.connection import get_pool
+    from app.okf.candidates import stage_okf_candidate_bundle
+
+    candidate = """---
+type: policy
+title: Candidate retry policy
+owner: workspace-agent
+version: 1
+timestamp: 2026-07-21
+visibility: public
+publication_status: draft
+tools: [search_gmail]
+---
+# Retry policy
+Use bounded retry only for safe reads.
+"""
+    with TestClient(app) as client:
+        async def exercise():
+            pool = await get_pool()
+            async with pool.acquire() as conn, conn.transaction():
+                bundle_hash = await stage_okf_candidate_bundle(
+                    conn, [{
+                        "path": "knowledge/policies/candidate-retry.md",
+                        "change_type": "create", "content": candidate,
+                    }], source_version="fixture-commit",
+                    validation_report={"passed": True, "trusted_identity": "fixture-ci"},
+                    privacy_report={"pii_scan": "passed"},
+                    security_report={"secret_scan": "passed"},
+                )
+                status = await conn.fetchval(
+                    "SELECT publication_status FROM okf_bundle_versions WHERE bundle_hash=$1",
+                    bundle_hash,
+                )
+                document = await conn.fetchval(
+                    """SELECT title FROM okf_bundle_documents
+                       WHERE bundle_hash=$1 AND document_id='policies/candidate-retry.md'""",
+                    bundle_hash,
+                )
+                await conn.execute(
+                    "DELETE FROM okf_bundle_versions WHERE bundle_hash=$1", bundle_hash,
+                )
+                return status, document
+
+        status, document = client.portal.call(exercise)
+        assert status == "validated"
+        assert document == "Candidate retry policy"
+
+
+def test_private_tool_result_store_is_encrypted_and_tenant_scoped():
+    from app.api.main import app
+    from app.db.connection import get_pool
+    from app.tools.result_store import load_private_tool_result, store_private_tool_result
+
+    user_id = f"private-result-{uuid.uuid4()}@example.com"
+    with TestClient(app) as client:
+        token = client.post("/auth/token", json={"email": user_id}).json()["access_token"]
+        response = client.post(
+            "/runs", headers={"Authorization": f"Bearer {token}"},
+            json={"session_id": f"private-{uuid.uuid4()}", "message": "what can you do?"},
+        )
+        assert response.status_code == 202
+        run_id = response.json()["run_id"]
+
+        async def exercise():
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                step_id = await conn.fetchval(
+                    "SELECT id FROM agent_run_steps WHERE run_id=$1 ORDER BY sequence_no LIMIT 1",
+                    uuid.UUID(run_id),
+                )
+            raw = {"body_plain": "tenant private fixture", "id": "message-1"}
+            reference = await store_private_tool_result(
+                pool, user_id=user_id, run_id=run_id, step_id=str(step_id),
+                tool_name="get_gmail_message", result=raw,
+            )
+            loaded = await load_private_tool_result(pool, reference, user_id)
+            denied = False
+            try:
+                await load_private_tool_result(pool, reference, "different@example.com")
+            except ValueError:
+                denied = True
+            async with pool.acquire() as conn:
+                encrypted = await conn.fetchval(
+                    "SELECT encrypted_payload FROM private_tool_results WHERE run_id=$1",
+                    uuid.UUID(run_id),
+                )
+                await conn.execute("DELETE FROM agent_runs WHERE id=$1", uuid.UUID(run_id))
+            return reference, loaded, encrypted, denied
+
+        reference, loaded, encrypted, denied = client.portal.call(exercise)
+        assert reference.startswith("private-tool-result:")
+        assert loaded["body_plain"] == "tenant private fixture"
+        assert "tenant private fixture" not in encrypted
+        assert denied is True
+
+
+def test_okf_overlay_requires_and_records_independent_human_approval():
+    from app.api.main import app
+    from app.db.connection import get_pool
+    from app.okf.candidates import stage_okf_candidate_bundle
+
+    marker = str(uuid.uuid4())
+    proposal_key = f"mixed-okf-{marker}"
+    content = """---
+type: policy
+title: Mixed candidate policy
+owner: workspace-agent
+version: 1
+timestamp: 2026-07-21
+visibility: public
+publication_status: draft
+---
+Use bounded metadata projection.
+"""
+    with TestClient(app) as client:
+        admin = client.post(
+            "/auth/token", json={"email": "achintyat256@gmail.com"}
+        ).json()["access_token"]
+        headers = {"Authorization": f"Bearer {admin}"}
+
+        async def seed():
+            pool = await get_pool()
+            async with pool.acquire() as conn, conn.transaction():
+                bundle_hash = await stage_okf_candidate_bundle(
+                    conn, [{
+                        "path": "knowledge/policies/mixed-candidate.md",
+                        "change_type": "create", "content": content,
+                    }], source_version="fixture-commit",
+                    validation_report={"passed": True, "trusted_identity": "fixture-ci"},
+                    privacy_report={"pii_scan": "passed"},
+                    security_report={"secret_scan": "passed"},
+                )
+                await conn.execute(
+                    """INSERT INTO improvement_proposals
+                       (proposal_key,proposal_type,title,sanitized_summary,status,
+                        content_hash,candidate_kind,candidate_state,candidate_manifest)
+                       VALUES($1,'policy','Mixed OKF','safe','awaiting_review',$2,'code',
+                              'validated_implementation',$3::jsonb)""",
+                    proposal_key, marker, json.dumps({
+                        "okf_bundle_hash": bundle_hash,
+                        "okf_approval_status": "awaiting_review",
+                        "applicability": {"rag_modes": ["none"]},
+                    }),
+                )
+                return bundle_hash
+
+        bundle_hash = client.portal.call(seed)
+        response = client.post(
+            f"/admin/improvements/{proposal_key}/okf-publication-decision",
+            headers=headers,
+            json={"decision": "approved", "proposal_hash": marker},
+        )
+        assert response.status_code == 200
+
+        async def verify_and_cleanup():
+            pool = await get_pool()
+            async with pool.acquire() as conn, conn.transaction():
+                manifest = await conn.fetchval(
+                    "SELECT candidate_manifest FROM improvement_proposals WHERE proposal_key=$1",
+                    proposal_key,
+                )
+                status = await conn.fetchval(
+                    "SELECT publication_status FROM okf_bundle_versions WHERE bundle_hash=$1",
+                    bundle_hash,
+                )
+                await conn.execute(
+                    "DELETE FROM improvement_proposals WHERE proposal_key=$1", proposal_key,
+                )
+                await conn.execute(
+                    "DELETE FROM okf_bundle_versions WHERE bundle_hash=$1", bundle_hash,
+                )
+                return manifest, status
+
+        manifest, status = client.portal.call(verify_and_cleanup)
+        assert manifest["okf_approval_status"] == "approved"
+        assert status == "validated"
 
 
 def test_hierarchical_rag_stores_and_expands_tenant_parent(monkeypatch):
@@ -966,6 +1149,10 @@ def test_diagnosis_only_proposal_cannot_be_approved_for_canary():
                     "passed": True, "commands": ["pytest tests/unit -q"],
                 },
                 "rollback_plan": {"action": "restore abcdef1"},
+                "applicability": {
+                    "services": ["gmail"], "operations": ["search"],
+                    "rag_modes": ["none"],
+                },
             },
         )
         assert candidate.status_code == 200

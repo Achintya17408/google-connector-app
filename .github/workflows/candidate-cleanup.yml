@@ -1,0 +1,48 @@
+name: Retire governed candidate worker
+on:
+  workflow_dispatch:
+    inputs:
+      proposal_key:
+        description: Governed proposal being retired
+        required: true
+      reason:
+        description: Sanitized retirement reason
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Link the isolated candidate project
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_CANDIDATE_PROJECT_ID: ${{ secrets.RAILWAY_CANDIDATE_PROJECT_ID }}
+          RAILWAY_CANDIDATE_WORKER_SERVICE: ${{ secrets.RAILWAY_CANDIDATE_WORKER_SERVICE }}
+        run: >-
+          npx -y @railway/cli@latest link
+          --project "$RAILWAY_CANDIDATE_PROJECT_ID"
+          --environment production
+          --service "$RAILWAY_CANDIDATE_WORKER_SERVICE"
+          --json >/dev/null
+      - name: Remove candidate public ingress and scale execution to zero
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_CANDIDATE_WORKER_SERVICE: ${{ secrets.RAILWAY_CANDIDATE_WORKER_SERVICE }}
+          RAILWAY_CANDIDATE_REGION: ${{ vars.RAILWAY_CANDIDATE_REGION }}
+        run: |
+          region="${RAILWAY_CANDIDATE_REGION:-southeast-asia}"
+          npx -y @railway/cli@latest domain list --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" --json > candidate-domains.json
+          python - <<'PY'
+          import json, subprocess, os
+          raw=json.load(open("candidate-domains.json"))
+          rows=raw if isinstance(raw,list) else raw.get("domains",raw.get("data",[]))
+          for row in rows:
+              value=row.get("id") or row.get("domain") or row.get("url")
+              if value:
+                  subprocess.check_call(["npx","-y","@railway/cli@latest","domain","delete",str(value),"--yes","--service",os.environ["RAILWAY_CANDIDATE_WORKER_SERVICE"]])
+          PY
+          npx -y @railway/cli@latest scale --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" "${region}=0" --json
+          echo "Retired ${{ inputs.proposal_key }}: ${{ inputs.reason }}"

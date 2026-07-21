@@ -3,7 +3,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-import tiktoken
+from app.utils.tokenizer import token_count as _count_tokens
+from app.utils.tokenizer import token_windows
 
 
 @dataclass
@@ -42,7 +43,6 @@ EXPERIMENT_POLICIES = {
     )
     for size in (256, 512, 768, 1024)
 }
-_TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
 
 def _character_windows(text: str, size: int, overlap: int) -> list[str]:
@@ -65,21 +65,7 @@ def _character_windows(text: str, size: int, overlap: int) -> list[str]:
 
 
 def _token_windows(text: str, size: int, overlap: int) -> list[str]:
-    normalized = " ".join(text.split())
-    if not normalized:
-        return []
-    tokens = _TOKENIZER.encode(normalized)
-    if size <= 0 or overlap < 0 or overlap >= size:
-        raise ValueError("Token window requires size>0 and 0<=overlap<size")
-    output = []
-    start = 0
-    while start < len(tokens):
-        end = min(len(tokens), start + size)
-        output.append(_TOKENIZER.decode(tokens[start:end]).strip())
-        if end >= len(tokens):
-            break
-        start = end - overlap
-    return output
+    return token_windows(text, size, overlap)
 
 
 def _windows(text: str, policy: ChunkingPolicy) -> list[str]:
@@ -107,7 +93,7 @@ def _parent_policy(policy: ChunkingPolicy) -> ChunkingPolicy:
 
 def token_count(text: str) -> int:
     """Return the reproducible proxy-token count used by offline policy experiments."""
-    return len(_TOKENIZER.encode(text))
+    return _count_tokens(text)
 
 
 def clean_email_body(body: str) -> str:

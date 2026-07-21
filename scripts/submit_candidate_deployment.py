@@ -1,24 +1,30 @@
 import json
 import os
-import subprocess
 
 import httpx
 
 
-status = json.loads(subprocess.check_output([
-    "npx", "-y", "@railway/cli@latest", "service", "status", "--json",
-    "--service", "google-connector-candidate-worker",
-], text=True))
-deployment = status.get("deploymentId") or status.get("latestDeployment", {}).get("id")
+with open("candidate-deployment.json", encoding="utf-8") as handle:
+    status = json.load(handle)
+deployment = status.get("latestDeployment") or status
+meta = deployment.get("meta") or {}
+with open("candidate-domain.json", encoding="utf-8") as handle:
+    domain = json.load(handle)
 payload = {
     "candidate_version": os.environ["CANDIDATE_VERSION"],
-    "deployment_id": deployment,
+    "deployment_id": deployment["id"],
     "service_name": os.environ["RAILWAY_CANDIDATE_WORKER_SERVICE"],
     "project_id": os.environ["RAILWAY_PROJECT_ID"],
     "workflow": os.environ["WORKFLOW_NAME"], "run_id": os.environ["RUN_ID"],
+    "image_digest": meta["imageDigest"],
+    "source_commit": meta["commitHash"],
+    "runtime_surfaces": domain["runtime_surfaces"],
+    "deployment_url": domain["deployment_url"],
     "smoke_tests": {"passed": True, "checks": [
-        "Railway deployment reached SUCCESS", "executor version pinned",
-        "worker has no public domain",
+        "Railway deployment reached SUCCESS with a RUNNING instance",
+        "source commit and executor version are pinned",
+        "candidate runtime emitted version-bound readiness",
+        "API health is version-bound when an API surface is present",
     ]},
     "verified": True,
 }

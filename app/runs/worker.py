@@ -57,8 +57,7 @@ async def claim_run(pool, owner: str):
                          (status='running' AND lease_expires_at < now()))
                      AND (($2='candidate' AND executor_version=$1
                            AND cohort_assignment='candidate')
-                          OR ($2='control' AND cohort_assignment='control'
-                              AND (canary_id IS NULL OR executor_version=$1)))
+                          OR ($2='control' AND executor_version=$1))
                      AND deleted_at IS NULL
                    ORDER BY queued_at
                    FOR UPDATE SKIP LOCKED LIMIT 1""",

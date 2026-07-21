@@ -12,6 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -23,4 +24,7 @@ jobs:
           CANDIDATE_BUILDER_URL: ${{ secrets.CANDIDATE_ATTESTATION_URL }}
           CANDIDATE_BUILDER_CALLBACK_TOKEN: ${{ secrets.CANDIDATE_BUILDER_CALLBACK_TOKEN }}
           CANDIDATE_BUILD_ID: ${{ inputs.build_id }}
-        run: python scripts/run_candidate_builder.py
+        run: |
+          ulimit -v 2097152
+          ulimit -u 256
+          timeout --signal=TERM 8m python scripts/run_candidate_builder.py

@@ -2,8 +2,10 @@ import asyncio
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import httpx
+import jwt
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -14,6 +16,7 @@ from app.db.google_clients import request_google_credentials
 from app.db import google_clients as google
 from app.db.oauth_credentials import load_google_credentials
 from app.runs.repository import (
+    CandidateAssignmentMismatch,
     RunLimitExceeded,
     append_event,
     cancel_run,
@@ -33,7 +36,11 @@ from app.runs.schemas import (
     RunResume,
 )
 from app.improvements.failure_intelligence import record_failure_incident
-from app.runs.planner import classify_request
+from app.runs.planner import classify_request, infer_operation
+from app.improvements.routing import (
+    resolve_candidate_api_target,
+    resolve_run_candidate_api_target,
+)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 sessions_router = APIRouter(prefix="/sessions", tags=["runs"])
@@ -41,6 +48,71 @@ sessions_router = APIRouter(prefix="/sessions", tags=["runs"])
 
 def _serializable(value):
     return json.loads(json.dumps(value, default=str))
+
+
+def _routing_plan(message: str) -> dict:
+    policy = classify_request(message)
+    services = policy.get("services") or []
+    return {
+        "services": services,
+        "rag_mode": policy.get("rag_mode", "none"),
+        "steps": [
+            {"operation": infer_operation(service, message, policy.get("write", False))}
+            for service in services
+        ],
+    }
+
+
+def _candidate_assertion(user_id: str, target) -> str:
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    return jwt.encode({
+        "purpose": "candidate-api-forward", "sub": user_id,
+        "candidate_version": target.candidate_version,
+        "canary_id": target.canary_id, "iat": now,
+        "exp": now + timedelta(seconds=60),
+    }, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def _validated_candidate_assertion(request: Request) -> dict:
+    settings = get_settings()
+    token = request.headers.get("x-candidate-forward", "")
+    if not token:
+        raise HTTPException(403, "Direct candidate API ingress is forbidden")
+    try:
+        claims = jwt.decode(
+            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm],
+            options={"require": ["sub", "exp", "purpose", "candidate_version", "canary_id"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise HTTPException(403, "Invalid candidate forwarding assertion") from exc
+    if (
+        claims.get("purpose") != "candidate-api-forward"
+        or claims.get("sub") != request.state.user_id
+        or claims.get("candidate_version") != settings.executor_version
+    ):
+        raise HTTPException(403, "Candidate forwarding assertion does not match this runtime")
+    return claims
+
+
+async def _forward_to_candidate(target, path: str, request: Request, payload: dict):
+    authorization = request.headers.get("authorization", "")
+    headers = {
+        "Authorization": authorization,
+        "X-Candidate-Forward": _candidate_assertion(request.state.user_id, target),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=get_settings().candidate_api_request_timeout_seconds) as client:
+            response = await client.post(target.url + path, json=payload, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "The selected candidate runtime is unavailable; the run was not sent to control") from exc
+    try:
+        content = response.json()
+    except ValueError:
+        content = {"detail": "Candidate runtime returned an invalid response"}
+    if response.status_code >= 400:
+        raise HTTPException(response.status_code, content.get("detail", content))
+    return content
 
 
 def _cleanup_hash(user_id: str, artifact_id: str, external_id: str, action: str) -> str:
@@ -79,7 +151,8 @@ def _google_cleanup(artifact: dict, action: str) -> dict:
 
 @router.post("", status_code=202)
 async def start_run(body: RunCreate, request: Request):
-    if not get_settings().durable_runs_enabled:
+    settings = get_settings()
+    if not settings.durable_runs_enabled:
         raise HTTPException(503, "Durable runs are disabled")
     pool = await get_pool()
     if not await feature_enabled(pool, "durable_runs", request.state.user_id):
@@ -89,10 +162,21 @@ async def start_run(body: RunCreate, request: Request):
         pool, "pilot_cohorts", request.state.user_id
     ):
         raise HTTPException(403, "This account is not in the active pilot cohort")
+    candidate_claims = None
+    if settings.executor_role == "candidate":
+        candidate_claims = _validated_candidate_assertion(request)
+    elif settings.executor_role == "control":
+        async with pool.acquire() as conn, conn.transaction():
+            target = await resolve_candidate_api_target(
+                conn, request.state.user_id, _routing_plan(body.message),
+            )
+        if target:
+            return await _forward_to_candidate(target, "/runs", request, body.model_dump(mode="json"))
     try:
         run, created = await create_run(
             pool, request.state.user_id, body.message,
             body.session_id, body.idempotency_key,
+            required_executor_version=(candidate_claims or {}).get("candidate_version"),
         )
     except RunLimitExceeded as exc:
         try:
@@ -109,7 +193,7 @@ async def start_run(body: RunCreate, request: Request):
         detail = {"message": str(exc), "stage": "admission",
                   "incident_id": str(incident["id"]) if incident else None}
         raise HTTPException(429, detail) from exc
-    except (ValueError, KeyError, TypeError) as exc:
+    except (CandidateAssignmentMismatch, ValueError, KeyError, TypeError) as exc:
         try:
             policy = classify_request(body.message)
             incident = await record_failure_incident(
@@ -221,8 +305,22 @@ async def approve_run(run_id: str, body: RunDecision, request: Request):
 
 @router.post("/{run_id}/clarify")
 async def submit_clarification(run_id: str, body: RunClarification, request: Request):
+    settings = get_settings()
+    pool = await get_pool()
+    if settings.executor_role == "candidate":
+        _validated_candidate_assertion(request)
+    else:
+        async with pool.acquire() as conn:
+            target = await resolve_run_candidate_api_target(
+                conn, run_id, request.state.user_id,
+            )
+        if target:
+            return await _forward_to_candidate(
+                target, f"/runs/{run_id}/clarify", request,
+                body.model_dump(mode="json"),
+            )
     status = await clarify_run(
-        await get_pool(), run_id, request.state.user_id, body.answers,
+        pool, run_id, request.state.user_id, body.answers,
     )
     if not status:
         raise HTTPException(409, "Run is not awaiting clarification")

@@ -48,3 +48,27 @@ artifacts from entering the Python production image.
 Run `pip-audit`, Bandit medium/high scanning, npm audit, and secret/history scans
 in release guardrails. New vulnerable evaluation dependencies must not be added
 to the API/worker image merely to preserve a particular benchmark library.
+
+## Governed candidate threat model — 2026-07-21
+
+- Prompt injection in failure evidence or repository text cannot invoke a shell or arbitrary
+  network tool. The builder exposes bounded list/search/read/in-memory-stage/diff operations.
+- Generated patches are never executed in the generation process. They remain untrusted until
+  secret/PII/path checks and trusted CI finish on the immutable commit.
+- Symlink/path traversal and credential-like paths are rejected; calls, files, bytes, output,
+  tokens, rounds, and elapsed time have hard limits.
+- The GitHub builder job receives only Groq and one narrowly scoped callback credential—not
+  Google OAuth, production PostgreSQL, Railway, Grafana, or user Workspace content.
+- Browser-supplied success cannot attest CI or deployment. Tokens are route-specific, hashes
+  bind approvals to content, and material changes invalidate review.
+- Candidate/control workers claim mutually exclusive executor versions. Candidate routing is
+  applicability- and cohort-bounded, and never-started queued work is reassigned on rollback.
+- OKF is a non-executable knowledge layer. It has an independent human publication decision
+  and cannot register tools, add scopes, or grant permissions.
+- Private full tool results are encrypted, tenant-scoped, size/retention bounded, excluded from
+  account exports, and removed with run/user retention.
+
+Remaining defense-in-depth: GitHub-hosted generation is an ephemeral credential-minimal
+checkout, but not a network-namespace sandbox with destination-level egress enforcement.
+Planner/API/frontend candidates also remain blocked from real canary execution until an
+isolated API/gateway or worker-side planning path is implemented.

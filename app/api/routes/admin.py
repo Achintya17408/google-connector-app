@@ -12,6 +12,7 @@ from app.runs.schemas import (
     ImprovementCandidateRegistration,
     CandidateValidationAttestation,
     CandidateDeploymentAttestation,
+    ProductionDeploymentAttestation,
     CandidateBuildDraft,
     CanaryActivationDecision,
     ImprovementDecision,
@@ -22,13 +23,16 @@ from app.config.settings import get_settings
 from app.db.google_clients import request_google_credentials
 from app.db.oauth_credentials import load_google_credentials
 from app.improvements.publisher import (
-    dispatch_candidate_deployment, publish_github_draft, send_proposal_email,
+    dispatch_candidate_cleanup, dispatch_candidate_deployment,
+    publish_github_draft, send_proposal_email,
     promote_candidate_pr,
 )
 from app.improvements.candidates import (
-    candidate_digest, file_digest, validate_candidate_files,
+    candidate_digest, candidate_runtime_surfaces, file_digest,
+    unsupported_candidate_surfaces, validate_candidate_files,
 )
 from app.improvements.builder import store_candidate_draft
+from app.okf.candidates import stage_okf_candidate_bundle
 from app.improvements.failure_intelligence import (
     create_or_update_proposal, create_theme_proposal,
 )
@@ -52,6 +56,53 @@ class FeatureFlagIn(BaseModel):
 class FailureIncidentDecisionIn(BaseModel):
     decision: str
     note: str | None = Field(default=None, max_length=4000)
+
+
+def _json_object(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+async def _retire_candidate_routing(
+    conn, proposal, *, reason: str, okf_state: str,
+) -> None:
+    """Stop assignment first, then return never-started work to control."""
+    canary = await conn.fetchrow(
+        """SELECT * FROM improvement_canaries WHERE proposal_id=$1
+           ORDER BY started_at DESC NULLS LAST,id DESC LIMIT 1 FOR UPDATE""",
+        proposal["id"],
+    )
+    if canary:
+        await conn.execute(
+            """UPDATE improvement_canaries SET routing_enabled=FALSE,
+                 status=CASE WHEN status IN ('pending','active','passed')
+                             THEN 'rolled_back' ELSE status END,
+                 rollback_reason=$2,rollback_at=now(),ended_at=COALESCE(ended_at,now())
+               WHERE id=$1""",
+            canary["id"], reason,
+        )
+        await conn.execute(
+            """UPDATE agent_runs SET executor_version=$1,cohort_assignment='control',
+                 assignment_reason=$2,canary_id=NULL
+               WHERE canary_id=$3 AND cohort_assignment='candidate' AND status='queued'
+                 AND NOT EXISTS(SELECT 1 FROM agent_run_steps s
+                   WHERE s.run_id=agent_runs.id AND s.status IN ('running','completed'))""",
+            canary["control_version"], reason, canary["id"],
+        )
+    bundle_hash = _json_object(proposal["candidate_manifest"]).get("okf_bundle_hash")
+    if bundle_hash:
+        await conn.execute(
+            """UPDATE okf_bundle_versions SET publication_status=$2
+               WHERE bundle_hash=$1 AND publication_status IN ('validated','canary')""",
+            bundle_hash, okf_state,
+        )
 
 
 @router.get("/candidate-builds")
@@ -117,7 +168,7 @@ async def attest_candidate_build(build_id: str, body: CandidateValidationAttesta
     async with pool.acquire() as conn, conn.transaction():
         build = await conn.fetchrow(
             """SELECT b.*,p.candidate_kind,p.candidate_version,p.exact_diff,
-                      p.rollback_plan,p.validation_report
+                      p.rollback_plan,p.validation_report,p.privacy_report,p.security_report
                FROM candidate_builds b JOIN improvement_proposals p ON p.id=b.proposal_id
                WHERE b.id=$1 FOR UPDATE""", build_id,
         )
@@ -147,6 +198,25 @@ async def attest_candidate_build(build_id: str, body: CandidateValidationAttesta
             candidate_version=body.commit_sha, exact_diff=build["exact_diff"],
             rollback_plan=build["rollback_plan"],
         )
+        manifest_patch = {
+            "candidate_commit": body.commit_sha, "candidate_tree": body.tree_sha,
+            "canary_eligible": True,
+            "runtime_surfaces": candidate_runtime_surfaces(digest_files),
+        }
+        okf_files = [
+            item for item in digest_files if item["path"].startswith("knowledge/")
+        ]
+        if okf_files:
+            try:
+                manifest_patch["okf_bundle_hash"] = await stage_okf_candidate_bundle(
+                    conn, okf_files, source_version=body.commit_sha,
+                    validation_report=report,
+                    privacy_report=_json_object(build["privacy_report"]),
+                    security_report=_json_object(build["security_report"]),
+                )
+                manifest_patch["okf_approval_status"] = "awaiting_review"
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
         await conn.execute(
             """INSERT INTO candidate_validation_runs
                (build_id,suite_version,commit_sha,status,commands,results,log_digest,
@@ -169,8 +239,7 @@ async def attest_candidate_build(build_id: str, body: CandidateValidationAttesta
                candidate_manifest=candidate_manifest||$4::jsonb,updated_at=now()
                WHERE id=$5""",
             body.commit_sha, json.dumps(report), digest,
-            json.dumps({"candidate_commit": body.commit_sha,
-                        "candidate_tree": body.tree_sha,"canary_eligible": True}),
+            json.dumps(manifest_patch),
             build["proposal_id"],
         )
     return {"build_id": build_id, "status": "validated", "content_hash": digest}
@@ -392,6 +461,7 @@ async def register_improvement_candidate(
     manifest = {
         "file_count": len(files), "candidate_digest": digest,
         "registered_by": request.state.user_id,
+        "applicability": body.applicability,
         "canary_eligible": True,
     }
     pool = await get_pool()
@@ -461,9 +531,9 @@ async def attest_candidate_deployment(
     proposal_key: str, body: CandidateDeploymentAttestation,
 ):
     settings = get_settings()
-    if not settings.railway_project_id:
-        raise HTTPException(503, "RAILWAY_PROJECT_ID is not configured")
-    if body.project_id != settings.railway_project_id:
+    if not settings.railway_candidate_project_id:
+        raise HTTPException(503, "RAILWAY_CANDIDATE_PROJECT_ID is not configured")
+    if body.project_id != settings.railway_candidate_project_id:
         raise HTTPException(409, "Deployment project does not match the governed project")
     if body.service_name != settings.railway_candidate_worker_service:
         raise HTTPException(409, "Deployment must target the isolated candidate worker")
@@ -479,22 +549,30 @@ async def attest_candidate_deployment(
             raise HTTPException(409, "Candidate must have human canary approval")
         if proposal["candidate_version"] != body.candidate_version:
             raise HTTPException(409, "Deployment commit does not match the frozen candidate")
+        if body.source_commit != body.candidate_version:
+            raise HTTPException(409, "Deployment source is not the approved candidate commit")
         candidate_paths = await conn.fetch(
             "SELECT path FROM improvement_candidate_files WHERE proposal_id=$1",
             proposal["id"],
         )
-        api_planning_paths = {
-            "app/runs/planner.py", "app/runs/repository.py", "app/api/routes/runs.py",
-        }
-        incompatible = sorted(
-            row["path"] for row in candidate_paths if row["path"] in api_planning_paths
+        incompatible = unsupported_candidate_surfaces(
+            [{"path": row["path"]} for row in candidate_paths]
         )
         if incompatible:
             raise HTTPException(
                 409,
-                "This candidate changes pre-worker planning and cannot be isolated by the "
-                f"worker-only canary target: {', '.join(incompatible)}",
+                "This candidate requires an isolated frontend preview/router that is not "
+                f"configured: {', '.join(incompatible)}",
             )
+        manifest = _json_object(proposal["candidate_manifest"])
+        expected_surfaces = sorted(manifest.get("runtime_surfaces") or ["worker"])
+        if sorted(body.runtime_surfaces) != expected_surfaces:
+            raise HTTPException(409, "Deployment runtime surfaces do not match the frozen candidate")
+        if "api" in expected_surfaces:
+            if not body.deployment_url or not body.deployment_url.startswith("https://"):
+                raise HTTPException(409, "API candidates require a verified HTTPS candidate URL")
+        elif body.deployment_url:
+            raise HTTPException(409, "Worker-only candidates must not expose a public URL")
         evidence = {
             **body.model_dump(),
             "trusted_identity": f"github-actions:{settings.github_proposal_repository}:{body.workflow}",
@@ -507,12 +585,101 @@ async def attest_candidate_deployment(
             proposal["id"],
         )
         await conn.execute(
-            """UPDATE improvement_canaries SET candidate_deployment_id=$1
-               WHERE id=(SELECT id FROM improvement_canaries WHERE proposal_id=$2
+            """UPDATE improvement_canaries SET candidate_deployment_id=$1,
+                 candidate_image_digest=$2
+               WHERE id=(SELECT id FROM improvement_canaries WHERE proposal_id=$3
                          AND status='pending' ORDER BY id DESC LIMIT 1)""",
-            body.deployment_id, proposal["id"],
+            body.deployment_id, body.image_digest, proposal["id"],
         )
     return {"proposal_key": proposal_key, "deployment_verified": True}
+
+
+@router.post("/improvements/production-attestation")
+async def attest_promoted_production(body: ProductionDeploymentAttestation):
+    """Trust a promoted candidate only after both production processes run its merge."""
+    settings = get_settings()
+    if body.project_id != settings.railway_project_id:
+        raise HTTPException(409, "Production deployment project does not match")
+    if body.api_service != "google-connector-app" or body.worker_service != "google-connector-worker":
+        raise HTTPException(409, "Both governed production services must be attested")
+    if not body.verified or body.smoke_tests.get("passed") is not True:
+        raise HTTPException(422, "Passing production smoke evidence is required")
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        proposal = await conn.fetchrow(
+            """SELECT * FROM improvement_proposals
+               WHERE status='production_pending'
+                 AND candidate_manifest->'production_merge'->>'commit_sha'=$1
+               ORDER BY updated_at DESC LIMIT 1 FOR UPDATE""",
+            body.production_commit,
+        )
+        if not proposal:
+            return {"status": "not_a_governed_promotion", "production_commit": body.production_commit}
+        evidence = {
+            **body.model_dump(),
+            "trusted_identity": (
+                f"github-actions:{settings.github_proposal_repository}:{body.workflow}"
+            ),
+        }
+        canary = await conn.fetchrow(
+            """SELECT * FROM improvement_canaries WHERE proposal_id=$1
+               ORDER BY started_at DESC NULLS LAST,id DESC LIMIT 1 FOR UPDATE""",
+            proposal["id"],
+        )
+        if not canary or canary["status"] != "passed":
+            raise HTTPException(409, "A passing measured canary is required")
+        await conn.execute(
+            """UPDATE improvement_canaries SET routing_enabled=FALSE,
+                 ended_at=COALESCE(ended_at,now()) WHERE id=$1""",
+            canary["id"],
+        )
+        await conn.execute(
+            """UPDATE agent_runs SET executor_version=$1,cohort_assignment='control',
+                 assignment_reason='candidate promoted to attested production',canary_id=NULL
+               WHERE canary_id=$2 AND cohort_assignment='candidate' AND status='queued'
+                 AND NOT EXISTS(SELECT 1 FROM agent_run_steps s
+                   WHERE s.run_id=agent_runs.id AND s.status IN ('running','completed'))""",
+            body.production_commit, canary["id"],
+        )
+        bundle_hash = _json_object(proposal["candidate_manifest"]).get(
+            "okf_bundle_hash"
+        )
+        if bundle_hash:
+            trusted = await conn.fetchval(
+                """UPDATE okf_bundle_versions SET publication_status='trusted',
+                     approved_by='production-attestation',approved_at=now()
+                   WHERE bundle_hash=$1 AND publication_status='canary'
+                   RETURNING bundle_hash""",
+                bundle_hash,
+            )
+            if not trusted:
+                raise HTTPException(409, "OKF canary bundle cannot be promoted")
+        await conn.execute(
+            """UPDATE improvement_proposals SET status='published',
+                 candidate_manifest=candidate_manifest||$1::jsonb,updated_at=now()
+               WHERE id=$2""",
+            json.dumps({"production_deployment": evidence}), proposal["id"],
+        )
+        if proposal["failure_cluster_key"]:
+            await conn.execute(
+                """UPDATE failure_clusters SET status='resolved',resolution_version=$2
+                   WHERE cluster_key=$1""",
+                proposal["failure_cluster_key"], body.production_commit,
+            )
+        from app.improvements.failure_intelligence import release_theme_for_proposal
+        await release_theme_for_proposal(conn, dict(proposal), resolved=True)
+    cleanup = None
+    if proposal["candidate_kind"] == "code":
+        try:
+            cleanup = await dispatch_candidate_cleanup(
+                proposal["proposal_key"], "promoted to attested production",
+            )
+        except Exception as exc:
+            cleanup = {"status": "not_dispatched", "reason": str(exc)}
+    return {
+        "status": "published", "proposal_key": proposal["proposal_key"],
+        "candidate_cleanup": cleanup,
+    }
 
 
 @router.get("/improvements-pending/count")
@@ -687,6 +854,54 @@ async def improvement(proposal_key: str):
     }
 
 
+@router.post("/improvements/{proposal_key}/okf-publication-decision")
+async def decide_candidate_okf(
+    proposal_key: str, body: ImprovementDecision, request: Request,
+):
+    """Independently approve candidate knowledge before code canary review."""
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        proposal = await conn.fetchrow(
+            "SELECT * FROM improvement_proposals WHERE proposal_key=$1 FOR UPDATE",
+            proposal_key,
+        )
+        if not proposal or proposal["status"] != "awaiting_review":
+            raise HTTPException(409, "Candidate is not awaiting review")
+        if proposal["content_hash"] != body.proposal_hash:
+            raise HTTPException(409, "Proposal changed; review the new frozen hash")
+        manifest = _json_object(proposal["candidate_manifest"])
+        bundle_hash = manifest.get("okf_bundle_hash")
+        if not bundle_hash:
+            raise HTTPException(409, "This candidate has no staged OKF bundle")
+        if body.decision == "changes_requested" and not (body.note or "").strip():
+            raise HTTPException(422, "A change-request note is required")
+        await conn.execute(
+            """INSERT INTO improvement_approvals
+               (proposal_id,stage,proposal_hash,decision,decided_by,decision_note)
+               VALUES($1,'okf_publication',$2,$3,$4,$5)""",
+            proposal["id"], body.proposal_hash, body.decision,
+            request.state.user_id, body.note,
+        )
+        state = {
+            "approved": "approved", "rejected": "rejected",
+            "changes_requested": "changes_requested",
+        }[body.decision]
+        await conn.execute(
+            """UPDATE improvement_proposals SET candidate_manifest=
+                 jsonb_set(candidate_manifest,'{okf_approval_status}',to_jsonb($1::text)),
+                 status=CASE WHEN $1='approved' THEN status ELSE 'changes_requested' END,
+                 updated_at=now() WHERE id=$2""",
+            state, proposal["id"],
+        )
+        if body.decision != "approved":
+            await conn.execute(
+                """UPDATE okf_bundle_versions SET publication_status='rejected'
+                   WHERE bundle_hash=$1 AND publication_status='validated'""",
+                bundle_hash,
+            )
+    return {"proposal_key": proposal_key, "okf_approval_status": state}
+
+
 @router.post("/improvements/{proposal_key}/canary-decision")
 async def decide_canary(proposal_key: str, body: ImprovementDecision, request: Request):
     pool = await get_pool()
@@ -710,6 +925,57 @@ async def decide_canary(proposal_key: str, body: ImprovementDecision, request: R
                 raise HTTPException(
                     409, "A trusted CI attestation bound to the candidate commit is required",
                 )
+            applicability = _json_object(proposal["candidate_manifest"]).get(
+                "applicability"
+            ) or {}
+            manifest = _json_object(proposal["candidate_manifest"])
+            if body.decision == "approved" and proposal["candidate_kind"] == "code":
+                files = await conn.fetch(
+                    "SELECT path FROM improvement_candidate_files WHERE proposal_id=$1",
+                    proposal["id"],
+                )
+                unsupported = unsupported_candidate_surfaces(
+                    [{"path": row["path"]} for row in files]
+                )
+                if unsupported:
+                    raise HTTPException(
+                        409, "Candidate requires an unconfigured isolated runtime: "
+                        + ", ".join(unsupported),
+                    )
+                competing = await conn.fetchval(
+                    """SELECT count(*) FROM improvement_canaries c
+                       JOIN improvement_proposals p ON p.id=c.proposal_id
+                       WHERE p.candidate_kind='code' AND c.proposal_id<>$1
+                         AND c.status IN ('pending','active','passed')""",
+                    proposal["id"],
+                )
+                if competing:
+                    raise HTTPException(
+                        409, "Another code candidate owns the isolated canary runtime",
+                    )
+            rag_modes = set(applicability.get("rag_modes") or [])
+            if (
+                body.decision == "approved" and manifest.get("okf_bundle_hash")
+                and manifest.get("okf_approval_status") != "approved"
+            ):
+                raise HTTPException(
+                    409, "The candidate OKF overlay requires separate human approval",
+                )
+            if body.decision == "approved" and not applicability:
+                raise HTTPException(409, "Candidate applicability must be explicitly bounded")
+            if body.decision == "approved" and not rag_modes:
+                raise HTTPException(409, "Candidate applicability must declare RAG modes")
+            if (
+                body.decision == "approved"
+                and proposal["candidate_kind"] == "code"
+                and rag_modes - {"none"}
+                and not get_settings().candidate_worker_rag_enabled
+            ):
+                raise HTTPException(
+                    409,
+                    "The isolated candidate worker has no candidate-scoped embedding endpoint; "
+                    "RAG code canaries remain blocked until one is configured",
+                )
             if body.decision == "changes_requested" and not (body.note or "").strip():
                 raise HTTPException(422, "A change-request note is required")
             await conn.execute(
@@ -727,6 +993,16 @@ async def decide_canary(proposal_key: str, body: ImprovementDecision, request: R
                 "UPDATE improvement_proposals SET status=$1,updated_at=now() WHERE id=$2",
                 next_status, proposal["id"],
             )
+            if body.decision != "approved":
+                from app.improvements.failure_intelligence import release_theme_for_proposal
+                await _retire_candidate_routing(
+                    conn, proposal,
+                    reason=f"Human canary review decision: {body.decision}",
+                    okf_state=(
+                        "rejected" if body.decision == "rejected" else "rolled_back"
+                    ),
+                )
+                await release_theme_for_proposal(conn, dict(proposal))
             if body.decision == "approved":
                 await conn.execute(
                     """INSERT INTO improvement_canaries
@@ -736,8 +1012,24 @@ async def decide_canary(proposal_key: str, body: ImprovementDecision, request: R
                     proposal["source_version"] or "current",
                     proposal["candidate_version"] or proposal["content_hash"][:12],
                 )
+                if proposal["candidate_kind"] in {"okf", "config", "prompt"}:
+                    virtual_evidence = {
+                        "verified": True,
+                        "candidate_version": proposal["candidate_version"],
+                        "deployment_id": "versioned-policy-registry",
+                        "smoke_tests": {"passed": True, "checks": [
+                            "trusted CI validated immutable content",
+                            "control executor supports per-run version pinning",
+                        ]},
+                        "trusted_identity": "versioned-policy-registry",
+                    }
+                    await conn.execute(
+                        """UPDATE improvement_proposals SET deployment_evidence=$1::jsonb,
+                           updated_at=now() WHERE id=$2""",
+                        json.dumps(virtual_evidence), proposal["id"],
+                    )
     deployment_dispatch = None
-    if body.decision == "approved":
+    if body.decision == "approved" and proposal["candidate_kind"] == "code":
         try:
             if get_settings().allow_dev_auth:
                 deployment_dispatch = {"status": "skipped_in_development"}
@@ -801,6 +1093,18 @@ async def activate_canary(proposal_key: str, body: CanaryActivationDecision,
                candidate_state='deployed_canary',updated_at=now() WHERE id=$1""",
             proposal["id"],
         )
+        bundle_hash = _json_object(proposal["candidate_manifest"]).get(
+            "okf_bundle_hash"
+        )
+        if bundle_hash:
+            staged = await conn.fetchval(
+                """UPDATE okf_bundle_versions SET publication_status='canary',
+                   approved_by=$2,approved_at=now() WHERE bundle_hash=$1
+                     AND publication_status='validated' RETURNING bundle_hash""",
+                bundle_hash, request.state.user_id,
+            )
+            if not staged:
+                raise HTTPException(409, "OKF bundle is not in validated publication state")
     return {"proposal_key": proposal_key, "status": "canary_active"}
 
 
@@ -825,6 +1129,18 @@ async def decide_promotion(proposal_key: str, body: ImprovementDecision,
             )
             if body.decision == "approved" and not canary_passed:
                 raise HTTPException(409, "A measured passing canary is required before promotion")
+            bundle_hash = _json_object(proposal["candidate_manifest"]).get(
+                "okf_bundle_hash"
+            )
+            if body.decision == "approved" and bundle_hash:
+                publication_state = await conn.fetchval(
+                    "SELECT publication_status FROM okf_bundle_versions WHERE bundle_hash=$1",
+                    bundle_hash,
+                )
+                if publication_state != "canary":
+                    raise HTTPException(
+                        409, "OKF bundle must complete validated canary state before publication",
+                    )
             await conn.execute(
                 """INSERT INTO improvement_approvals
                    (proposal_id,stage,proposal_hash,decision,decided_by,decision_note)
@@ -840,19 +1156,37 @@ async def decide_promotion(proposal_key: str, body: ImprovementDecision,
                 "UPDATE improvement_proposals SET status=$1,updated_at=now() WHERE id=$2",
                 next_status, proposal["id"],
             )
+            if body.decision != "approved":
+                from app.improvements.failure_intelligence import release_theme_for_proposal
+                await _retire_candidate_routing(
+                    conn, proposal,
+                    reason=f"Human promotion decision: {body.decision}",
+                    okf_state=(
+                        "rejected" if body.decision == "rejected" else "rolled_back"
+                    ),
+                )
+                await release_theme_for_proposal(conn, dict(proposal))
     publication = None
     if body.decision == "approved":
         try:
             publication = await promote_candidate_pr(dict(proposal))
             async with pool.acquire() as conn:
-                await conn.execute(
-                    """UPDATE improvement_proposals SET status='published',
-                       candidate_manifest=candidate_manifest||$1::jsonb,updated_at=now()
-                       WHERE id=$2""",
-                    json.dumps({"production_merge": publication}), proposal["id"],
-                )
-            next_status = "published"
+                async with conn.transaction():
+                    await conn.execute(
+                        """UPDATE improvement_proposals SET status='production_pending',
+                           candidate_manifest=candidate_manifest||$1::jsonb,updated_at=now()
+                           WHERE id=$2""",
+                        json.dumps({"production_merge": publication}), proposal["id"],
+                    )
+            next_status = "production_pending"
         except Exception as exc:
             publication = {"status": "not_published", "reason": str(exc)}
+    elif proposal["candidate_kind"] == "code":
+        try:
+            publication = await dispatch_candidate_cleanup(
+                proposal_key, f"promotion decision {body.decision}",
+            )
+        except Exception as exc:
+            publication = {"status": "cleanup_not_dispatched", "reason": str(exc)}
     return {"proposal_key": proposal_key, "status": next_status,
             "publication": publication}
