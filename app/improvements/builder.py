@@ -32,6 +32,15 @@ def candidate_model_order(job: dict) -> list[str]:
     return list(dict.fromkeys(model for model in ordered if model))
 
 
+def effective_builder_token_budget(job: dict) -> int:
+    """Allow bounded multi-role fallback work without changing runtime LLM budgets."""
+    settings = get_settings()
+    stored = int(job["token_budget"])
+    if len(candidate_model_order(job)) > 1:
+        return max(stored, settings.candidate_builder_max_effective_token_budget)
+    return stored
+
+
 def is_tool_generation_failure(exc: Exception) -> bool:
     """Detect Groq's safe failure shape without retaining attempted arguments."""
     body = getattr(exc, "body", None)
@@ -234,7 +243,10 @@ async def _groq_json(
         client, job,
         messages=[{"role": "user", "content": _candidate_prompt(job, sources, role)}],
         temperature=0.1,
-        max_tokens=min(settings.candidate_builder_max_output_tokens, job["token_budget"]),
+        max_tokens=min(
+            settings.candidate_builder_max_output_tokens,
+            effective_builder_token_budget(job),
+        ),
         response_format={"type": "json_object"},
     )
     data = json.loads(response.choices[0].message.content)
@@ -269,11 +281,12 @@ async def _groq_tool_json(
         ),
     }]
     tokens = 0
+    token_budget = effective_builder_token_budget(job)
     models_used: list[str] = []
     for _ in range(12):
-        if tokens >= job["token_budget"]:
+        if tokens >= token_budget:
             raise RuntimeError("Candidate token budget exhausted during tool reasoning")
-        remaining = max(256, job["token_budget"] - tokens)
+        remaining = max(256, token_budget - tokens)
         messages = _fit_builder_history(messages)
         response, model = await _candidate_completion(
             client, job, messages=messages,
@@ -339,9 +352,10 @@ async def generate_candidate_draft(
     repository_tools = BoundedRepositoryTools(ROOT)
     candidate = None
     tokens = 0
+    token_budget = effective_builder_token_budget(job)
     models_used: list[str] = []
     for role in roles:
-        if tokens >= job["token_budget"]:
+        if tokens >= token_budget:
             raise RuntimeError("Candidate token budget exhausted before review")
         if role == "independent_safety_reviewer":
             output, used, call_models = await _groq_tool_json(

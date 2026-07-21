@@ -68,7 +68,8 @@ from app.improvements.candidates import (
 from app.improvements.builder import (
     _candidate_completion, _compact_builder_tool_call, _fit_builder_history,
     candidate_model_order, candidate_review_projection, choose_builder_mode,
-    is_tool_generation_failure, normalize_candidate_contract,
+    effective_builder_token_budget, is_tool_generation_failure,
+    normalize_candidate_contract,
 )
 from app.improvements.builder_tools import (
     BoundedRepositoryTools, BuilderToolLimitError,
@@ -138,6 +139,20 @@ def test_candidate_builder_fallback_is_isolated_and_ordered(monkeypatch):
         assert candidate_model_order({"model_name": "llama-3.3-70b-versatile"}) == [
             "llama-3.3-70b-versatile", "openai/gpt-oss-120b",
         ]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_candidate_builder_effective_budget_expands_only_with_fallback(monkeypatch):
+    monkeypatch.setenv("CANDIDATE_BUILDER_MAX_EFFECTIVE_TOKEN_BUDGET", "24000")
+    monkeypatch.setenv("CANDIDATE_BUILDER_FALLBACK_MODELS", "openai/gpt-oss-120b")
+    get_settings.cache_clear()
+    try:
+        job = {"model_name": "llama-3.3-70b-versatile", "token_budget": 12000}
+        assert effective_builder_token_budget(job) == 24000
+        monkeypatch.setenv("CANDIDATE_BUILDER_FALLBACK_MODELS", "")
+        get_settings.cache_clear()
+        assert effective_builder_token_budget(job) == 12000
     finally:
         get_settings.cache_clear()
 
