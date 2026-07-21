@@ -14,6 +14,7 @@ from app.runs.schemas import (
     CandidateDeploymentAttestation,
     ProductionDeploymentAttestation,
     CandidateBuildDraft,
+    CandidateBuildFailure,
     CanaryActivationDecision,
     ImprovementDecision,
     ImprovementDeploymentEvidence,
@@ -155,6 +156,54 @@ async def candidate_builder_draft(build_id: str, body: CandidateBuildDraft):
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/candidate-builder/{build_id}/failure")
+async def candidate_builder_failure(build_id: str, body: CandidateBuildFailure):
+    """Persist a sanitized runner failure and return retryable work to the queue."""
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        build = await conn.fetchrow(
+            """SELECT b.*,p.id proposal_id FROM candidate_builds b
+               JOIN improvement_proposals p ON p.id=b.proposal_id
+               WHERE b.id=$1 AND b.status IN ('queued','investigating') FOR UPDATE""",
+            build_id,
+        )
+        if not build:
+            raise HTTPException(409, "Candidate build is unavailable or already finalized")
+        state = "queued" if body.retryable else "failed"
+        checkpoint = {
+            "last_runner_failure": {
+                "stage": body.stage, "error_type": body.error_type,
+                "retryable": body.retryable,
+                "retry_after_seconds": body.retry_after_seconds,
+                "contains_private_evidence": False,
+            },
+        }
+        await conn.execute(
+            """UPDATE candidate_builds SET status=$1,error_message=$2,
+               checkpoint=checkpoint||$3::jsonb,updated_at=now(),
+               completed_at=CASE WHEN $1='failed' THEN now() ELSE NULL END
+               WHERE id=$4""",
+            state, body.message, json.dumps(checkpoint), build_id,
+        )
+        payload = json.dumps({
+            "build_id": build_id, "stage": body.stage,
+            "error_type": body.error_type, "retryable": body.retryable,
+            "retry_after_seconds": body.retry_after_seconds,
+            "contains_private_evidence": False,
+        })
+        await conn.execute(
+            """INSERT INTO improvement_notifications
+               (proposal_id,channel,event_type,status,sanitized_payload)
+               VALUES($1,'admin','candidate_builder_failure','sent',$2::jsonb),
+                     ($1,'grafana','candidate_builder_failure','sent',$2::jsonb)
+               ON CONFLICT(proposal_id,channel,event_type) DO UPDATE SET
+                 status='sent',sanitized_payload=excluded.sanitized_payload,
+                 error_message=NULL,created_at=now()""",
+            build["proposal_id"], payload,
+        )
+    return {"build_id": build_id, "status": state, "retryable": body.retryable}
 
 
 @router.post("/candidate-builds/{build_id}/attestation")
