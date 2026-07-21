@@ -68,7 +68,8 @@ from app.improvements.candidates import (
 from app.improvements.builder import (
     _candidate_completion, _compact_builder_tool_call, _fit_builder_history,
     _groq_tool_json,
-    candidate_model_order, candidate_review_projection, choose_builder_mode,
+    candidate_contract_errors, candidate_model_order, candidate_review_projection,
+    choose_builder_mode,
     effective_builder_token_budget, is_tool_generation_failure,
     normalize_candidate_contract,
 )
@@ -562,6 +563,87 @@ def test_candidate_builder_reserves_json_only_finalization_turns(monkeypatch, tm
         assert "tools" not in requests[10]
         assert requests[10]["response_format"] == {"type": "json_object"}
         assert "finalization_required" in requests[10]["messages"][-1]["content"]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_candidate_contract_preflight_returns_only_safe_reason_codes():
+    candidate = normalize_candidate_contract({
+        "files": [
+            {"path": "../.env", "change_type": "replace", "content": "api_key=x"},
+            {"path": "tests/ok.py", "change_type": "invalid", "content": "x"},
+        ],
+        "rollback_plan": "remove candidate",
+        "validation_commands": "pytest -q",
+    })
+    errors = candidate_contract_errors(candidate)
+    assert "path_outside_approved_roots" in errors
+    assert "secret_like_content" in errors
+    assert "file_change_type_invalid" in errors
+    assert all("api_key=x" not in error for error in errors)
+
+
+def test_candidate_builder_corrects_invalid_final_contract_once(monkeypatch, tmp_path):
+    requests = []
+
+    class Completions:
+        async def create(self, *, model, **kwargs):
+            requests.append(kwargs)
+            usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
+            if len(requests) == 11:
+                content = json.dumps({
+                    "files": [], "rollback_plan": {"action": "rollback"},
+                    "validation_commands": [],
+                })
+            elif len(requests) == 12:
+                content = json.dumps({
+                    "files": [{
+                        "path": "tests/contract_retry.py", "change_type": "create",
+                        "content": "value = 1\n",
+                    }],
+                    "rollback_plan": {"action": "remove candidate"},
+                    "validation_commands": ["pytest -q tests/unit"],
+                })
+            else:
+                call = SimpleNamespace(
+                    id=f"call-{len(requests)}",
+                    function=SimpleNamespace(
+                        name="inspect_candidate_diff", arguments="{}",
+                    ),
+                )
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(
+                        content="", tool_calls=[call],
+                    ))], usage=usage,
+                )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(
+                    content=content, tool_calls=None,
+                ))], usage=usage,
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    monkeypatch.setattr("app.improvements.builder.AsyncGroq", lambda **_: client)
+    monkeypatch.setenv("GROQ_API_KEY", "unit-test-key")
+    monkeypatch.setenv("CANDIDATE_BUILDER_FALLBACK_MODELS", "")
+    get_settings.cache_clear()
+    try:
+        candidate, tokens, _ = asyncio.run(_groq_tool_json(
+            {
+                "model_name": "openai/gpt-oss-20b", "token_budget": 1_000,
+                "sanitized_input": {"title": "contract correction test"},
+            },
+            BoundedRepositoryTools(tmp_path), "coordinator",
+        ))
+        assert candidate["files"][0]["path"] == "tests/contract_retry.py"
+        assert candidate["exact_diff"].startswith("Frozen candidate files")
+        assert tokens == 24
+        assert any(
+            "candidate_contract_rejected" in message["content"]
+            for message in requests[11]["messages"]
+        )
+        assert "tools" not in requests[10]
+        assert "tools" not in requests[11]
     finally:
         get_settings.cache_clear()
 

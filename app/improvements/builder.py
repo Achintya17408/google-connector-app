@@ -279,6 +279,55 @@ def normalize_candidate_contract(candidate: dict) -> dict:
         value["validation_commands"] = []
     return value
 
+
+def candidate_contract_errors(candidate: dict) -> list[str]:
+    """Return bounded, content-free reasons a draft cannot enter the API."""
+    errors: list[str] = []
+    files = candidate.get("files")
+    if not isinstance(files, list) or not files:
+        return ["files_required"]
+    if len(files) > 50:
+        errors.append("too_many_files")
+    structurally_valid = []
+    for item in files[:50]:
+        if not isinstance(item, dict):
+            errors.append("file_entry_not_object")
+            continue
+        path = item.get("path")
+        change_type = item.get("change_type")
+        content = item.get("content")
+        if not isinstance(path, str) or not path or len(path) > 500:
+            errors.append("file_path_invalid")
+            continue
+        if change_type not in {"create", "replace", "delete"}:
+            errors.append("file_change_type_invalid")
+            continue
+        if content is not None and not isinstance(content, str):
+            errors.append("file_content_not_string")
+            continue
+        if isinstance(content, str) and len(content) > 500_000:
+            errors.append("file_content_too_large")
+            continue
+        structurally_valid.append(item)
+    if structurally_valid:
+        for detail in validate_candidate_files(structurally_valid):
+            if detail.startswith("Duplicate candidate path"):
+                errors.append("duplicate_path")
+            elif "outside approved roots" in detail or "Unsafe candidate path" in detail:
+                errors.append("path_outside_approved_roots")
+            elif "credentials" in detail or "secret-like" in detail:
+                errors.append("secret_like_content")
+            else:
+                errors.append("candidate_file_policy_rejected")
+    if not isinstance(candidate.get("rollback_plan"), dict):
+        errors.append("rollback_plan_invalid")
+    commands = candidate.get("validation_commands")
+    if not isinstance(commands, list) or len(commands) > 50 or not all(
+        isinstance(command, str) for command in commands
+    ):
+        errors.append("validation_commands_invalid")
+    return list(dict.fromkeys(errors))
+
 def choose_builder_mode(risk_level: str, change_scope: list[str]) -> str:
     return "multi_role" if risk_level in {"high", "critical"} or len(change_scope) > 3 else "single"
 
@@ -500,6 +549,29 @@ async def _groq_tool_json(
         if tools.staged_files():
             candidate["files"] = tools.staged_files()
             candidate.setdefault("exact_diff", tools.diff()["diff"])
+        candidate = normalize_candidate_contract(candidate)
+        if not candidate.get("exact_diff"):
+            candidate["exact_diff"] = (
+                "Frozen candidate files are authoritative; trusted CI will compute the diff."
+            )
+        contract_errors = candidate_contract_errors(candidate)
+        if contract_errors:
+            if round_number < 11:
+                messages.append({
+                    "role": "user",
+                    "content": json.dumps({
+                        "candidate_contract_rejected": contract_errors,
+                        "instruction": (
+                            "Return one corrected final candidate JSON object now. Include at "
+                            "least one complete file under an approved root; do not claim tests passed."
+                        ),
+                    }),
+                })
+                continue
+            raise RuntimeError(
+                "Candidate contract failed local validation: "
+                + ",".join(contract_errors)
+            )
         return candidate, tokens, models_used
     raise RuntimeError("Candidate builder exceeded its bounded reasoning/tool rounds")
 
