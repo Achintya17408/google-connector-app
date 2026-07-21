@@ -708,6 +708,8 @@ def test_candidate_builder_classifies_groq_status_without_raw_error():
     ("Candidate builder exceeded its bounded reasoning/tool rounds",
      "tool_round_limit_exhausted"),
     ("Groq candidate output was not valid JSON", "invalid_candidate_json"),
+    ("Candidate contract failed local validation: files_required",
+     "candidate_contract_invalid"),
     ("model supplied unsafe review reason", "bounded_runtime_failure"),
 ])
 def test_candidate_builder_runtime_failures_have_sanitized_codes(message, code):
