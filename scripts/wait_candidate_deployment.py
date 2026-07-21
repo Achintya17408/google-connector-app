@@ -12,10 +12,27 @@ surfaces = set(filter(None, os.environ.get("CANDIDATE_RUNTIME_SURFACES", "").spl
 healthy = None
 for _ in range(60):
     value = json.loads(subprocess.check_output([
-        "npx", "-y", "@railway/cli@latest", "service", "status", "--json",
-        "--service", service,
+        "npx", "-y", "@railway/cli@latest", "status", "--json",
     ], text=True))
-    deployment = value.get("latestDeployment") or value
+    deployment = None
+    for environment in value.get("environments", {}).get("edges", []):
+        for entry in environment.get("node", {}).get("serviceInstances", {}).get("edges", []):
+            node = entry.get("node", {})
+            if node.get("serviceName") != service:
+                continue
+            active = [
+                item for item in node.get("activeDeployments", [])
+                if item.get("status") == "SUCCESS"
+                and item.get("instances")
+                and all(instance.get("status") == "RUNNING" for instance in item["instances"])
+                and (item.get("meta") or {}).get("imageDigest", "").startswith("sha256:")
+            ]
+            deployment = (
+                max(active, key=lambda item: item.get("createdAt", ""))
+                if active else node.get("latestDeployment")
+            )
+            break
+    deployment = deployment or {}
     status = deployment.get("status")
     if status == "SUCCESS":
         meta = deployment.get("meta") or {}
@@ -25,7 +42,7 @@ for _ in range(60):
         if not instances or any(item.get("status") != "RUNNING" for item in instances):
             time.sleep(10)
             continue
-        healthy = value
+        healthy = {"latestDeployment": deployment}
         break
     if status in {"FAILED", "CRASHED", "REMOVED"}:
         raise SystemExit(f"Candidate deployment failed: {status}")

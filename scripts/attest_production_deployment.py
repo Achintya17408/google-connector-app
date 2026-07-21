@@ -15,10 +15,26 @@ SERVICES = ("google-connector-app", "google-connector-worker")
 
 def service_status(service: str) -> dict:
     value = json.loads(subprocess.check_output([
-        "npx", "-y", "@railway/cli@latest", "service", "status", "--json",
-        "--service", service,
+        "npx", "-y", "@railway/cli@latest", "status", "--json",
     ], text=True))
-    return value.get("latestDeployment") or value
+    environments = value.get("environments", {}).get("edges", [])
+    for environment in environments:
+        services = environment.get("node", {}).get("serviceInstances", {}).get("edges", [])
+        for entry in services:
+            node = entry.get("node", {})
+            if node.get("serviceName") != service:
+                continue
+            active = [
+                item for item in node.get("activeDeployments", [])
+                if item.get("status") == "SUCCESS"
+                and item.get("instances")
+                and all(instance.get("status") == "RUNNING" for instance in item["instances"])
+                and (item.get("meta") or {}).get("imageDigest", "").startswith("sha256:")
+            ]
+            if active:
+                return max(active, key=lambda item: item.get("createdAt", ""))
+            return node.get("latestDeployment") or {}
+    return {}
 
 
 def wait_for_service(service: str) -> dict:
