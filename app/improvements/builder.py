@@ -388,12 +388,38 @@ async def _groq_tool_json(
             raise RuntimeError("Candidate token budget exhausted during tool reasoning")
         remaining = max(256, token_budget - tokens)
         messages = _fit_builder_history(messages)
-        response, model, json_tool_protocol = await _candidate_completion(
-            client, job, messages=messages,
-            tools=tools.schemas(), tool_choice="auto", temperature=0.1,
-            max_tokens=min(settings.candidate_builder_max_output_tokens, remaining),
-            json_tool_protocol=json_tool_protocol,
-        )
+        force_finalize = round_number >= 10
+        if force_finalize:
+            final_messages = _json_tool_protocol_kwargs({
+                "messages": messages, "tools": [],
+            })["messages"]
+            final_messages.append({
+                "role": "user",
+                "content": json.dumps({
+                    "finalization_required": True,
+                    "instruction": (
+                        "Repository investigation is closed. Return the final JSON contract "
+                        "now using the evidence and staged files already available. Do not "
+                        "request another tool."
+                    ),
+                    "staged_files": candidate_review_projection({
+                        "files": tools.staged_files(),
+                    })["files"],
+                }),
+            })
+            response, model, _ = await _candidate_completion(
+                client, job, messages=final_messages, temperature=0.1,
+                max_tokens=min(settings.candidate_builder_max_output_tokens, remaining),
+                response_format={"type": "json_object"},
+            )
+            json_tool_protocol = True
+        else:
+            response, model, json_tool_protocol = await _candidate_completion(
+                client, job, messages=messages,
+                tools=tools.schemas(), tool_choice="auto", temperature=0.1,
+                max_tokens=min(settings.candidate_builder_max_output_tokens, remaining),
+                json_tool_protocol=json_tool_protocol,
+            )
         if model not in models_used:
             models_used.append(model)
         usage = response.usage
@@ -430,6 +456,17 @@ async def _groq_tool_json(
             raise RuntimeError("Groq candidate output was not valid JSON") from exc
         protocol_call = candidate.get("tool_call") if json_tool_protocol else None
         if isinstance(protocol_call, dict):
+            if force_finalize:
+                messages.append({
+                    "role": "user",
+                    "content": json.dumps({
+                        "tool_result": {
+                            "name": protocol_call.get("name"),
+                            "error": "repository tools are closed; finalize the candidate",
+                        },
+                    }),
+                })
+                continue
             name = str(protocol_call.get("name") or "")
             arguments = protocol_call.get("arguments")
             if not isinstance(arguments, dict):
