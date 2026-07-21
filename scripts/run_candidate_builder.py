@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from groq import APITimeoutError, RateLimitError
+from groq import APIStatusError, APITimeoutError, RateLimitError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -21,6 +21,8 @@ def failure_payload(exc: Exception, stage: str) -> dict:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     retryable = isinstance(exc, (RateLimitError, APITimeoutError, httpx.TransportError)) or (
+        isinstance(exc, APIStatusError) and (status == 429 or (status or 0) >= 500)
+    ) or (
         isinstance(exc, httpx.HTTPStatusError) and (status == 429 or (status or 0) >= 500)
     )
     retry_after = None
@@ -32,6 +34,8 @@ def failure_payload(exc: Exception, stage: str) -> dict:
             retry_after = None
     if isinstance(exc, RateLimitError):
         message = "Groq model quota is exhausted; retry after the provider reset."
+    elif isinstance(exc, APIStatusError):
+        message = f"Groq API returned HTTP {status} during candidate {stage}."
     elif isinstance(exc, httpx.HTTPStatusError):
         message = f"Candidate callback returned HTTP {status} during {stage}."
     else:

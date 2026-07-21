@@ -181,6 +181,30 @@ def test_candidate_builder_failure_payload_is_sanitized_and_retryable():
     }
 
 
+def test_candidate_builder_classifies_groq_status_without_raw_error():
+    from groq import BadRequestError, InternalServerError
+
+    request = httpx.Request("POST", "https://api.groq.com/test")
+    server_error = InternalServerError(
+        "private upstream detail",
+        response=httpx.Response(503, request=request), body=None,
+    )
+    assert failure_payload(server_error, "generation") == {
+        "stage": "generation", "error_type": "InternalServerError",
+        "message": "Groq API returned HTTP 503 during candidate generation.",
+        "retryable": True, "retry_after_seconds": None,
+    }
+    bad_request = BadRequestError(
+        "private prompt detail",
+        response=httpx.Response(400, request=request), body=None,
+    )
+    assert failure_payload(bad_request, "generation") == {
+        "stage": "generation", "error_type": "BadRequestError",
+        "message": "Groq API returned HTTP 400 during candidate generation.",
+        "retryable": False, "retry_after_seconds": None,
+    }
+
+
 def test_dual_worker_simulation_has_no_double_claim_and_sticky_rollback():
     runs = [SimulatedRun("a", "control"), SimulatedRun("b", "candidate")]
     assert simulate_claims(runs, "control", "candidate") == {
