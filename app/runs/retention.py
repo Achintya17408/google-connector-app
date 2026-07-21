@@ -14,6 +14,7 @@ async def apply_retention(pool) -> dict[str, int]:
         ("raw_conversations", "conversation_history", "DELETE FROM conversation_history WHERE created_at < now()-($1 * interval '1 day')", settings.raw_telemetry_retention_days),
         ("expired_run_events", "agent_run_events", "DELETE FROM agent_run_events WHERE created_at < now()-($1 * interval '1 day')", settings.workflow_retention_days),
         ("raw_embedding_payloads", "embedding_jobs", "DELETE FROM embedding_jobs WHERE completed_at IS NOT NULL AND completed_at < now()-($1 * interval '1 day')", settings.raw_telemetry_retention_days),
+        ("expired_private_tool_results", "private_tool_results", "DELETE FROM private_tool_results WHERE expires_at < now()", 0),
         ("expired_rag", "rag_chunks", "UPDATE rag_chunks SET deleted_at=now() WHERE deleted_at IS NULL AND indexed_at < now()-($1 * interval '1 day')", settings.workflow_retention_days),
         ("expired_runs", "agent_runs", "UPDATE agent_runs SET deleted_at=now() WHERE deleted_at IS NULL AND retention_until < now() AND status NOT IN ('queued','running','awaiting_approval')", 0),
     ]
@@ -50,6 +51,7 @@ async def delete_user_data(pool, user_id: str) -> dict[str, int]:
             user_id,
         )
         deletion_queries = (
+            ("private_tool_results", "DELETE FROM private_tool_results WHERE user_id=$1"),
             ("rag_chunks", "DELETE FROM rag_chunks WHERE user_id=$1"),
             ("feedback", "DELETE FROM feedback WHERE user_id=$1"),
             ("conversation_history", "DELETE FROM conversation_history WHERE user_id=$1"),
@@ -117,6 +119,7 @@ async def export_user_data(pool, user_id: str) -> dict:
         "user_id": user_id,
         "google_connected": google_connected,
         "oauth_credentials_excluded": True,
+        "private_tool_results_excluded": True,
         "runs": runs, "steps": steps, "events": events, "artifacts": artifacts,
         "conversations": conversations, "feedback": feedback,
         "rag_chunks_without_embeddings": rag, "learning_trajectories": trajectories,

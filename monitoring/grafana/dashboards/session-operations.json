@@ -121,10 +121,15 @@
       "type":"table","title":"Failure themes and canary assignments","gridPos":{"h":11,"w":12,"x":12,"y":122},
       "datasource":{"type":"postgres","uid":"postgres-reporting"},
       "targets":[{"format":"table","rawSql":"SELECT theme_key,title,status,occurrence_count,cluster_count,recommended_option,last_seen FROM reporting.failure_theme_summary ORDER BY last_seen DESC LIMIT 100","refId":"A"},{"format":"table","rawSql":"SELECT run_id,session_id,regexp_replace(user_id,'(^.).*(@.*$)','\\1***\\2') AS user_id,status,executor_version,cohort_assignment,assignment_reason,technical_completion,functional_completion,user_visible_completion,side_effect_integrity,queued_at FROM reporting.canary_run_assignments WHERE queued_at BETWEEN $__timeFrom() AND $__timeTo() ORDER BY queued_at DESC LIMIT 150","refId":"B"}]
+    },
+    {
+      "type":"table","title":"Trusted OKF publication and candidate scope","gridPos":{"h":11,"w":24,"x":0,"y":133},
+      "datasource":{"type":"postgres","uid":"postgres-reporting"},
+      "targets":[{"format":"table","rawSql":"SELECT bundle_hash,source_version,publication_status,approved_by,approved_at,proposal_key,proposal_status,candidate_version,applicability,created_at FROM reporting.okf_candidate_publication ORDER BY created_at DESC LIMIT 150","refId":"A"},{"format":"table","rawSql":"SELECT proposal_key,candidate_kind,candidate_state,status,applicability,canary_status,routing_enabled,traffic_percent,control_version,routed_candidate_version FROM reporting.candidate_applicability ORDER BY proposal_key DESC LIMIT 150","refId":"B"}]
     }
   ],
   "refresh":"30s","schemaVersion":41,
   "tags":["google-connector","sessions","workflows"],
   "templating":{"list":[]},"time":{"from":"now-24h","to":"now"},
-  "title":"Google Connector Session Operations","uid":"google-connector-sessions","version":5
+  "title":"Google Connector Session Operations","uid":"google-connector-sessions","version":6
 }

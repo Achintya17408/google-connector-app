@@ -11,6 +11,7 @@ from app.mlops.metrics import (
     failure_notifications,
     failure_review_queue,
     failure_theme_queue,
+    okf_bundle_publications,
     rag_quality,
     rag_quality_samples,
     run_queue_depth,
@@ -24,7 +25,8 @@ RUN_STATES = (
 EMBEDDING_STATES = ("queued", "running", "completed", "failed", "dead_letter")
 PROPOSAL_STATES = (
     "awaiting_review", "approved_for_canary", "canary_active",
-    "awaiting_promotion", "approved_for_publication", "rolled_back",
+    "awaiting_promotion", "approved_for_publication", "production_pending",
+    "published", "rejected", "changes_requested", "expired", "rolled_back",
 )
 CLEANUP_STATES = (
     "awaiting_confirmation", "approved", "rejected", "executing", "completed",
@@ -36,6 +38,9 @@ CANDIDATE_BUILD_STATES = (
     "queued", "investigating", "drafted", "validating", "validated", "failed", "cancelled",
 )
 FAILURE_THEME_STATES = ("active", "candidate_building", "resolved", "suppressed")
+OKF_PUBLICATION_STATES = (
+    "draft", "validated", "canary", "trusted", "rolled_back", "rejected",
+)
 
 
 async def collect_operational_metrics(pool):
@@ -55,6 +60,8 @@ async def collect_operational_metrics(pool):
         candidate_build_queue.labels(state).set(0)
     for state in FAILURE_THEME_STATES:
         failure_theme_queue.labels(state).set(0)
+    for state in OKF_PUBLICATION_STATES:
+        okf_bundle_publications.labels(state).set(0)
     for stage in ("intake", "classification", "planning", "validation", "admission",
                   "approval", "execution", "verification", "recovery", "persistence", "api"):
         for risk in ("low", "medium", "high"):
@@ -102,6 +109,11 @@ async def collect_operational_metrics(pool):
             "SELECT status,count(*) AS count FROM failure_themes GROUP BY status"
         ):
             failure_theme_queue.labels(row["status"]).set(row["count"])
+        for row in await conn.fetch(
+            """SELECT publication_status AS status,count(*) AS count
+               FROM okf_bundle_versions GROUP BY publication_status"""
+        ):
+            okf_bundle_publications.labels(row["status"]).set(row["count"])
         for row in await conn.fetch(
             """SELECT status,routing_enabled,count(*) AS count
                FROM improvement_canaries GROUP BY status,routing_enabled"""

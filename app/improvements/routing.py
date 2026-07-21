@@ -20,8 +20,29 @@ def stable_bucket(canary_id: str, user_id: str) -> int:
     return int.from_bytes(digest[:8], "big") % 100
 
 
+def candidate_applies(manifest: dict, plan: dict | None) -> bool:
+    """Require an explicit service/operation boundary before routing a candidate."""
+    applicability = manifest.get("applicability") or {}
+    if not applicability:
+        return False
+    plan_services = set((plan or {}).get("services") or [])
+    plan_operations = {
+        step.get("operation") for step in ((plan or {}).get("steps") or [])
+        if step.get("operation")
+    }
+    required_services = set(applicability.get("services") or [])
+    required_operations = set(applicability.get("operations") or [])
+    required_rag_modes = set(applicability.get("rag_modes") or [])
+    plan_rag_mode = (plan or {}).get("rag_mode", "none")
+    return not (
+        (required_services and not (required_services & plan_services))
+        or (required_operations and not (required_operations & plan_operations))
+        or (required_rag_modes and plan_rag_mode not in required_rag_modes)
+    )
+
+
 async def resolve_executor_assignment(
-    conn, user_id: str, control_version: str,
+    conn, user_id: str, control_version: str, plan: dict | None = None,
 ) -> ExecutorAssignment:
     canaries = await conn.fetch(
         """SELECT c.*,p.candidate_kind,p.candidate_manifest
@@ -31,6 +52,9 @@ async def resolve_executor_assignment(
            ORDER BY c.started_at,c.id FOR UPDATE"""
     )
     for row in canaries:
+        manifest = row["candidate_manifest"] or {}
+        if not candidate_applies(manifest, plan):
+            continue
         allowed = set(row["allowed_users"] or [])
         denied = set(row["denied_users"] or [])
         if user_id in denied:
@@ -39,8 +63,11 @@ async def resolve_executor_assignment(
             not allowed and stable_bucket(str(row["id"]), user_id) < row["traffic_percent"]
         )
         cohort = "candidate" if selected else "control"
-        version = row["candidate_version"] if selected else row["control_version"]
-        manifest = row["candidate_manifest"] or {}
+        version = (
+            row["control_version"]
+            if selected and row["candidate_kind"] in {"okf", "config", "prompt"}
+            else (row["candidate_version"] if selected else row["control_version"])
+        )
         return ExecutorAssignment(
             executor_version=version or control_version,
             canary_id=str(row["id"]),

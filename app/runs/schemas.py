@@ -91,6 +91,7 @@ class ImprovementCandidateRegistration(BaseModel):
     files: list[ImprovementCandidateFile] = Field(min_length=1, max_length=50)
     validation_report: dict[str, Any]
     rollback_plan: dict[str, Any]
+    applicability: dict[str, list[str]]
 
 
 class ImprovementDeploymentEvidence(BaseModel):
@@ -120,6 +121,23 @@ class CandidateDeploymentAttestation(BaseModel):
     deployment_id: str = Field(min_length=1, max_length=300)
     service_name: str = Field(min_length=1, max_length=200)
     project_id: str = Field(min_length=1, max_length=200)
+    workflow: str = Field(min_length=1, max_length=300)
+    run_id: str = Field(min_length=1, max_length=100)
+    image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    smoke_tests: dict[str, Any]
+    verified: bool
+
+
+class ProductionDeploymentAttestation(BaseModel):
+    production_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    project_id: str = Field(min_length=1, max_length=200)
+    api_service: str = Field(min_length=1, max_length=200)
+    api_deployment_id: str = Field(min_length=1, max_length=300)
+    api_image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    worker_service: str = Field(min_length=1, max_length=200)
+    worker_deployment_id: str = Field(min_length=1, max_length=300)
+    worker_image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     workflow: str = Field(min_length=1, max_length=300)
     run_id: str = Field(min_length=1, max_length=100)
     smoke_tests: dict[str, Any]

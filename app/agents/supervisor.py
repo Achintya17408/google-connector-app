@@ -4,7 +4,9 @@ import re
 import time
 import uuid
 import hashlib
+import logging
 from collections.abc import Sequence
+from dataclasses import replace
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -33,6 +35,9 @@ from app.okf.retriever import pack_operational_knowledge, retrieve_operational_k
 from app.config.feature_flags import feature_enabled
 from app.config.settings import get_settings
 from app.tools.result_projection import project_tool_result
+from app.tools.result_store import store_private_tool_result
+
+logger = logging.getLogger(__name__)
 
 SERVICES = ("gmail", "calendar", "drive", "docs", "sheets", "tasks", "chat", "contacts", "meet")
 ALIASES = {
@@ -283,6 +288,20 @@ async def execute_tool_call(tool: BaseTool, call: dict, state: AgentState, pool)
             tool.name, result,
             max_tokens=get_settings().groq_tool_result_max_tokens,
         )
+        if envelope.truncated:
+            try:
+                reference = await store_private_tool_result(
+                    pool, user_id=state.get("user_id"), run_id=state.get("run_id"),
+                    step_id=state.get("step_id"), tool_name=tool.name, result=result,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Private tool-result storage skipped tool=%s error_type=%s",
+                    tool.name, type(exc).__name__,
+                )
+                reference = None
+            if reference:
+                envelope = replace(envelope, full_result_reference=reference)
         tool_result_tokens.labels(tool.name, str(envelope.truncated).lower()).observe(
             envelope.estimated_tokens
         )

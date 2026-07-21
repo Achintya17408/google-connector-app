@@ -143,7 +143,7 @@ async def create_run(pool, user_id, message, session_id, idempotency_key=None):
                     "retry after quota resets or increase the configured budget"
                 )
             assignment = await resolve_executor_assignment(
-                conn, user_id, settings.deployment_version,
+                conn, user_id, settings.deployment_version, plan.model_dump(),
             )
             run = await conn.fetchrow(
                 """INSERT INTO agent_runs

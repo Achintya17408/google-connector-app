@@ -1,8 +1,10 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 from prometheus_client import start_http_server
 
 from app.agents.supervisor import build_agent_graph
+from app.config.settings import get_settings
 from app.db.connection import close_pool, get_pool
 from app.okf.loader import sync_bundle
 from app.runs.worker import worker_loop
@@ -14,11 +16,24 @@ async def main():
     configure_tracing()
     start_http_server(8001)
     pool = await get_pool()
-    await sync_bundle(pool)
+    settings = get_settings()
+    if settings.executor_role != "candidate":
+        await sync_bundle(pool)
     app = SimpleNamespace(state=SimpleNamespace(agent_graph=build_agent_graph(pool)))
+    logging.getLogger(__name__).warning(
+        "worker_ready role=%s executor_version=%s deployment_version=%s",
+        settings.executor_role, settings.executor_version, settings.deployment_version,
+    )
     stop = asyncio.Event()
     try:
-        await asyncio.gather(worker_loop(app, pool, stop), embedding_worker_loop(pool, stop))
+        if settings.executor_role == "candidate":
+            # Candidate deployments execute only explicitly assigned runs. They must not
+            # compete with the control deployment for global embedding/persistence jobs.
+            await worker_loop(app, pool, stop)
+        else:
+            await asyncio.gather(
+                worker_loop(app, pool, stop), embedding_worker_loop(pool, stop),
+            )
     finally:
         await close_pool()
 

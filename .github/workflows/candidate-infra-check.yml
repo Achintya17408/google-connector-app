@@ -1,0 +1,24 @@
+name: Candidate infrastructure check
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify isolated Railway project access without deploying
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_CANDIDATE_PROJECT_ID: ${{ secrets.RAILWAY_CANDIDATE_PROJECT_ID }}
+          RAILWAY_CANDIDATE_WORKER_SERVICE: ${{ secrets.RAILWAY_CANDIDATE_WORKER_SERVICE }}
+        run: |
+          npx -y @railway/cli@latest link \
+            --project "$RAILWAY_CANDIDATE_PROJECT_ID" \
+            --environment production \
+            --service "$RAILWAY_CANDIDATE_WORKER_SERVICE" \
+            --json >/dev/null
+          test "$(npx -y @railway/cli@latest status --json | jq -r .id)" = "$RAILWAY_CANDIDATE_PROJECT_ID"
+          test "$(npx -y @railway/cli@latest service list --json | jq -r --arg service "$RAILWAY_CANDIDATE_WORKER_SERVICE" '[.[]|select(.name==$service)]|length')" = "1"

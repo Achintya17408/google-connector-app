@@ -14,6 +14,9 @@ _URL = re.compile(r"https?://\S+")
 _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", re.I)
 _LONG_ID = re.compile(r"\b[A-Za-z0-9_-]{24,}\b")
 _NUMBER = re.compile(r"\b\d+\b")
+_PROVIDER_CODE = re.compile(
+    r"(?i)(?:error code|status(?: code)?|http)\s*[:=]?\s*([1-5]\d\d)|\b([1-5]\d\d)\b"
+)
 
 
 def sanitize_request_excerpt(message: str) -> str:
@@ -36,6 +39,7 @@ def request_shape(message: str, policy: dict | None = None) -> dict:
         "has_time": bool(re.search(r"\b\d{1,2}(?::\d{2})?\s*(am|pm)\b", text)),
         "service_count": len(policy.get("services") or []),
         "services": policy.get("services") or [],
+        "rag_mode": policy.get("rag_mode", "none"),
         "write": bool(policy.get("write")),
         "risk_level": policy.get("risk_level", "low"),
         "clarification_count": len(policy.get("required_clarifications") or []),
@@ -57,11 +61,35 @@ def failure_fingerprint(
     service: str | None = None, operation: str | None = None,
 ) -> tuple[str, str]:
     normalized = normalize_error(error)
+    mechanism, provider_code, _ = failure_mechanism(category, error)
+    boundary = ":".join((component, service or "none", operation or "none"))
     canonical = "\0".join([
-        stage, category, component, service or "none", operation or "none", normalized,
+        "fingerprint-v2", mechanism, boundary, provider_code or "none",
+        stage, category, normalized,
     ])
     digest = hashlib.sha256(canonical.encode()).hexdigest()
     return digest, digest[:24]
+
+
+def failure_mechanism(category: str, error: str) -> tuple[str, str | None, bool]:
+    normalized = normalize_error(error)
+    match = _PROVIDER_CODE.search(error or "")
+    provider_code = next((item for item in (match.groups() if match else ()) if item), None)
+    mechanisms = {
+        "model_context_length": "context_budget_overflow",
+        "rate_limit": "provider_quota",
+        "network": "transient_transport",
+        "authentication": "credential_or_token_rejection",
+        "permission": "authorization_or_scope_rejection",
+        "verification": "postcondition_mismatch",
+        "planning": "planner_contract_rejection",
+        "embedding": "embedding_pipeline_failure",
+    }
+    mechanism = mechanisms.get(category, "execution_contract_failure")
+    if "invalid execution plan" in normalized or "unknown operation" in normalized:
+        mechanism = "planner_contract_rejection"
+    recoverable = category in {"rate_limit", "network", "embedding"}
+    return mechanism, provider_code, recoverable
 
 
 def _option(
@@ -479,6 +507,30 @@ async def create_theme_proposal(pool, theme_id, selected_option: str, actor: str
     }
 
 
+async def release_theme_for_proposal(conn, proposal: dict, *, resolved: bool = False) -> None:
+    """Release a systemic theme after a proposal reaches a terminal outcome.
+
+    Failed, rejected, expired, and rolled-back candidates must not suppress later
+    evidence. Only an attested production publication resolves the theme.
+    """
+    manifest = proposal.get("candidate_manifest") or {}
+    if isinstance(manifest, str):
+        try:
+            manifest = json.loads(manifest)
+        except (TypeError, ValueError):
+            manifest = {}
+    theme_id = manifest.get("theme_id") if isinstance(manifest, dict) else None
+    if not theme_id:
+        return
+    await conn.execute(
+        """UPDATE failure_themes SET status=$1,last_seen=now(),
+             metadata=metadata||$2::jsonb WHERE id=$3""",
+        "resolved" if resolved else "active",
+        json.dumps({"last_proposal_outcome": "published" if resolved else "released"}),
+        theme_id,
+    )
+
+
 async def record_failure_incident(
     pool, *, occurrence_key: str | None = None, run_id=None, session_id: str | None,
     user_id: str, message: str, intent_kind: str, stage: str, category: str,
@@ -495,6 +547,11 @@ async def record_failure_incident(
         service=service, operation=operation, breaking_point=breaking_point,
     )
     occurrence_key = occurrence_key or f"incident:{uuid.uuid4()}"
+    mechanism, provider_code, recoverable = failure_mechanism(category, error)
+    boundary = ":".join((component, service or "none", operation or "none"))
+    from app.config.settings import get_settings
+    source_version = get_settings().deployment_version
+    safe_evidence = evidence or {}
     payload = {
         "occurrence_key": occurrence_key, "run_id": run_id,
         "session_id": session_id, "user_id": user_id,
@@ -504,7 +561,11 @@ async def record_failure_incident(
         "service": service, "operation": operation,
         "failure_fingerprint": fingerprint, "cluster_key": cluster,
         "breaking_point": breaking_point,
-        "completion": completion or {}, "evidence": evidence or {}, **analysis,
+        "completion": completion or {}, "evidence": safe_evidence,
+        "failure_mechanism": mechanism, "architectural_boundary": boundary,
+        "provider_code": provider_code, "recoverable": recoverable,
+        "last_verified_operation": safe_evidence.get("last_verified_operation"),
+        "source_version": source_version, **analysis,
     }
     async with pool.acquire() as conn, conn.transaction():
         incident = await conn.fetchrow(
@@ -514,10 +575,12 @@ async def record_failure_incident(
                 failure_fingerprint,cluster_key,title,summary,root_cause,
                 contributing_factors,breaking_point,completion,evidence,
                 improvement_options,recommended_option,recommendation_reason,
-                risk_level,automation_eligible)
+                risk_level,automation_eligible,failure_mechanism,
+                architectural_boundary,provider_code,recoverable,
+                last_verified_operation,source_version)
                VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                       $16,$17,$18::jsonb,$19,$20::jsonb,$21::jsonb,$22::jsonb,$23,
-                      $24,$25,$26)
+                      $24,$25,$26,$27,$28,$29,$30,$31,$32)
                ON CONFLICT(occurrence_key) DO UPDATE SET updated_at=now()
                RETURNING *""",
             payload["occurrence_key"], payload["run_id"], payload["session_id"],
@@ -531,19 +594,28 @@ async def record_failure_incident(
             json.dumps(payload["evidence"]), json.dumps(payload["improvement_options"]),
             payload["recommended_option"], payload["recommendation_reason"],
             payload["risk_level"], payload["automation_eligible"],
+            payload["failure_mechanism"], payload["architectural_boundary"],
+            payload["provider_code"], payload["recoverable"],
+            payload["last_verified_operation"], payload["source_version"],
         )
         await conn.execute(
             """INSERT INTO failure_clusters
                (cluster_key,stage,category,component,service,operation,title,
                 normalized_signature,occurrence_count,first_seen,last_seen,
-                latest_incident_id,metadata)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,now(),now(),$9,$10::jsonb)
+                latest_incident_id,metadata,mechanism,boundary,first_version,latest_version)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,now(),now(),$9,$10::jsonb,$11,$12,$13,$13)
                ON CONFLICT(cluster_key) DO UPDATE SET
                  last_seen=now(),latest_incident_id=excluded.latest_incident_id,
-                 title=excluded.title,metadata=failure_clusters.metadata||excluded.metadata""",
+                 title=excluded.title,metadata=failure_clusters.metadata||excluded.metadata,
+                 mechanism=excluded.mechanism,boundary=excluded.boundary,
+                 latest_version=excluded.latest_version,
+                 reopened_count=failure_clusters.reopened_count+
+                   CASE WHEN failure_clusters.status='resolved' THEN 1 ELSE 0 END,
+                 status='active'""",
             cluster, stage, category, component, service, operation, analysis["title"],
             normalize_error(error), incident["id"],
             json.dumps({"risk_level": analysis["risk_level"]}),
+            mechanism, boundary, source_version,
         )
         membership = await conn.execute(
             """INSERT INTO failure_cluster_occurrences(cluster_key,incident_id)

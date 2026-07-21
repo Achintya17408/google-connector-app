@@ -33,6 +33,15 @@ def _fernet() -> MultiFernet:
     return MultiFernet(_fernets())
 
 
+def encrypt_private_payload(payload: bytes) -> str:
+    """Encrypt tenant-private transient data with the rotatable application keyring."""
+    return _fernet().encrypt(payload).decode()
+
+
+def decrypt_private_payload(payload: str) -> bytes:
+    return _fernet().decrypt(payload.encode())
+
+
 async def save_google_credentials(pool, email: str, credentials: Credentials):
     payload = _fernet().encrypt(credentials.to_json().encode()).decode()
     scopes = list(credentials.scopes or SCOPES)

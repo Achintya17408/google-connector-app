@@ -48,13 +48,15 @@ jobs:
         run: python scripts/run_policy_evals.py
       - name: Compare greedy and DP context packing offline
         run: python scripts/run_context_packing_evals.py
+      - name: Evaluate DP workflow and periodic quota allocation offline
+        run: python scripts/run_dp_allocation_evals.py
       - name: Validate version-controlled Grafana dashboards
         run: python scripts/sync_grafana_dashboards.py
       - name: Verify migration downgrade and forward repair
         run: |
           alembic downgrade 002
           alembic upgrade head
-          test "$(alembic current | tail -1)" = "012 (head)"
+          test "$(alembic current | tail -1)" = "013 (head)"
       - name: Validate Docker Compose model
         run: |
           cp .env.example .env

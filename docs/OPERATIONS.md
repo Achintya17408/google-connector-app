@@ -45,6 +45,35 @@ approves that external publication path. Approval never edits trusted OKF or run
 policy directly: it authorizes a selected-user canary; only the later promotion
 approval can publish the already hash-frozen candidate.
 
+Current governed sequence:
+
+1. Review an exact occurrence/cluster/theme and choose option A or B.
+2. The credential-minimal builder generates a bounded untrusted draft and regression tests.
+3. Explicitly approve public draft-PR creation; trusted CI validates every application surface.
+4. Review the frozen hash. Separately approve any bundled OKF overlay.
+5. Approve isolated candidate deployment, then separately activate selected-user traffic.
+6. Wait for minimum labelled control/candidate evidence. Safety regressions roll back assignment.
+7. Approve promotion. Production remains `production_pending` until both Railway API and
+   worker attest the exact merged commit and smoke tests.
+
+Rejected, expired, rolled-back, and failed-build policy themes return to `active` so later
+evidence can reopen them. Only attested production publication resolves a theme. Code that
+changes API, planner, or frontend surfaces is blocked from the worker-only candidate target;
+do not bypass this by claiming worker deployment evidence.
+
+The isolated candidate Railway project should remain scaled to zero until the deployment
+gate is approved. It needs no public domain. `candidate-infra-check.yml` validates access
+without deploying; `candidate-cleanup.yml` returns its worker region to zero after rollback,
+rejection, or promotion.
+
+## Tokenizer and bounded-result recovery
+
+The exact `cl100k_base` tokenizer is downloaded during image build into
+`/opt/tiktoken-cache`. Runtime modules load it lazily. If the cache is unexpectedly absent
+and the network is unavailable, model-result budgeting uses a conservative UTF-8 byte bound,
+DP falls back to greedy packing, and the worker remains available. Rebuild the immutable
+image to restore exact-tokenizer eligibility; never solve this by allowing unbounded results.
+
 After final promotion approval, the **Publish sanitized draft PR** button creates a
 new branch containing only `.improvement-proposals/<key>.md` and opens a draft PR;
 it never auto-merges. It requires `GITHUB_PROPOSAL_REPOSITORY` and a short-lived

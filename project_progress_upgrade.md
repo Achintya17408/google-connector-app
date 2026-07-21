@@ -451,34 +451,34 @@ Guardrail: every accepted request has a durable outcome or a separately durable 
 
 ### Epic 28.1 — Metadata-only Gmail sender extraction
 
-- [ ] Add an explicitly registered `list_recent_gmail_senders` operation that lists
+- [x] Add an explicitly registered `list_recent_gmail_senders` operation that lists
   recent message IDs, fetches only required metadata headers, parses names/addresses,
   supports ordered unique/non-unique semantics, and returns a compact bounded schema.
-- [ ] Route requests such as “last 20 people who mailed me” to this operation without
+- [x] Route requests such as “last 20 people who mailed me” to this operation without
   reading bodies/HTML, invoking RAG, or asking an LLM to extract deterministic fields.
-- [ ] Preserve message IDs/date provenance and verify count, order, non-empty names,
+- [x] Preserve message IDs/date provenance and verify count, order, non-empty names,
   duplicate policy, authorization, and dependency output for downstream Sheets.
 
 ### Epic 28.2 — Universal result envelopes and approved projection
 
-- [ ] Introduce typed result envelopes carrying compact output, tenant-scoped full-result
+- [x] Introduce typed result envelopes carrying compact output, tenant-scoped full-result
   references, item/byte/token counts, projection version, truncation, and continuation.
-- [ ] Define per-service/operation projection allowlists. Raw Gmail/Drive/Docs/Chat data
+- [x] Define per-service/operation projection allowlists. Raw Gmail/Drive/Docs/Chat data
   must never be appended directly to an LLM conversation merely because a tool returned it.
-- [ ] Store necessary full results in bounded private durable storage and supply only the
+- [x] Store necessary full results in bounded private durable storage and supply only the
   projected result/reference to the model; preserve verifier access without public leakage.
-- [ ] Apply prompt-injection sanitization after structural projection and before any
+- [x] Apply prompt-injection sanitization after structural projection and before any
   remaining untrusted text reaches the model.
 
 ### Epic 28.3 — Context-budget manager and safe recovery
 
-- [ ] Account before every model call for system/OKF/RAG/tool-schema/history/result and
+- [x] Account before every model call for system/OKF/RAG/tool-schema/history/result and
   reserved-completion tokens using the configured model budget.
-- [ ] Compact, paginate, defer, or deterministically replan before provider rejection;
+- [x] Compact, paginate, defer, or deterministically replan before provider rejection;
   never silently discard required postcondition data.
-- [ ] Classify context overflow as `model_context_length` with boundary, component,
+- [x] Classify context overflow as `model_context_length` with boundary, component,
   service, operation, model, estimated tokens, result sizes, and safe recoverability.
-- [ ] Record only safe size/count telemetry, not private tool content; distinguish a
+- [x] Record only safe size/count telemetry, not private tool content; distinguish a
   completed read sub-operation from a fully verified workflow step in progress reports.
 
 Guardrail: the reported Gmail -> Sheet -> Chat + Calendar/Meet request reaches the
@@ -489,34 +489,34 @@ tool results are bounded before every model call.
 
 ### Epic 29.1 — Occurrences and concrete clusters
 
-- [ ] Extend immutable occurrences with failure mechanism, architectural boundary,
+- [x] Extend immutable occurrences with failure mechanism, architectural boundary,
   provider code, safe payload-size facts, last verified sub-operation, recoverability,
   affected versions, and reproduction/candidate linkage.
-- [ ] Version concrete fingerprints from mechanism + boundary + component + service +
+- [x] Version concrete fingerprints from mechanism + boundary + component + service +
   operation + normalized provider code; exclude PII, volatile identifiers, and raw data.
-- [ ] Track cluster occurrence/version ranges, regression coverage, resolution version,
+- [x] Track cluster occurrence/version ranges, regression coverage, resolution version,
   reopening, selected strategy, and active candidate without losing individual evidence.
 
 ### Epic 29.2 — Cross-cluster policy themes
 
-- [ ] Replace the inactive category-only legacy proposal generator with a deterministic
+- [x] Replace the inactive category-only legacy proposal generator with a deterministic
   cross-cluster theme analyzer based on shared mechanism/boundary/component family.
-- [ ] Require multiple concrete clusters, an evidence threshold, and confidence facts
+- [x] Require multiple concrete clusters, an evidence threshold, and confidence facts
   before claiming a systemic issue; a broad label such as `execution` is insufficient.
-- [ ] Give every theme two bounded options (systemic fix and narrower containment),
+- [x] Give every theme two bounded options (systemic fix and narrower containment),
   acceptance tests, risks, scope, rollback, automation eligibility, and evidence links.
-- [ ] Version/deduplicate themes; rejected/expired/resolved items must not suppress new
+- [x] Version/deduplicate themes; rejected/expired/resolved items must not suppress new
   evidence on a later deployment, while resolved versions do not create proposal spam.
 
 ### Epic 29.3 — Portal, reporting, and lifecycle clarity
 
-- [ ] Separate Active Failures, Concrete Clusters, Policy Themes, Candidate Pipeline,
+- [x] Separate Active Failures, Concrete Clusters, Policy Themes, Candidate Pipeline,
   and collapsed History (rejected/expired/rolled-back/published) in the admin portal.
-- [ ] Make every button state its exact effect: strategy selection is not implementation,
+- [x] Make every button state its exact effect: strategy selection is not implementation,
   candidate approval is not deployment, and activation is not promotion.
-- [ ] Add read-only reporting views, bounded metrics/alerts, Grafana panels, notification
+- [x] Add read-only reporting views, bounded metrics/alerts, Grafana panels, notification
   ledgers, retention, and tenant/admin authorization for all three intelligence levels.
-- [ ] Remove the legacy category generator from active behavior after reversible migration
+- [x] Remove the legacy category generator from active behavior after reversible migration
   of its historical proposals; retain audit history without presenting it as new evidence.
 
 Guardrail: unrelated `execution` failures never share a code proposal solely because of
@@ -526,45 +526,45 @@ their category; a multi-service unbounded-result theme requires at least two spe
 
 ### Epic 30.1 — Candidate specification and reproduction
 
-- [ ] Convert a human-selected occurrence/cluster/theme option into a sanitized, typed
+- [x] Convert a human-selected occurrence/cluster/theme option into a sanitized, typed
   implementation specification with scope, invariants, acceptance tests, forbidden
   effects, base version, expiry, and rollback requirements.
-- [ ] Reproduce using no-network Google adapters, synthetic bounded fixtures, or an
+- [x] Reproduce using no-network Google adapters, synthetic bounded fixtures, or an
   approved deterministic test; unresolved/private-only failures remain diagnosis-only.
-- [ ] Never send raw Workspace bodies, OAuth material, production secrets, or unrestricted
+- [x] Never send raw Workspace bodies, OAuth material, production secrets, or unrestricted
   repository/database content to Groq.
 
 ### Epic 30.2 — Adaptive single/multi-agent Groq builder
 
-- [ ] Implement a token-budgeted Groq coordinator using the existing configured Groq key.
+- [x] Implement a token-budgeted Groq coordinator using the existing configured Groq key.
   Use one agent for small candidates and investigator/patch/test/reviewer roles only when
   deterministic complexity/risk thresholds require them.
-- [ ] Expose least-privilege tools for repository listing/search/read, bounded patch
+- [x] Expose least-privilege tools for repository listing/search/read, bounded patch
   proposal/application, diff inspection, allowlisted validation, and candidate rollback.
-- [ ] Limit files, bytes, iterations, tool calls, elapsed time, and Groq tokens per build;
+- [x] Limit files, bytes, iterations, tool calls, elapsed time, and Groq tokens per build;
   pause with truthful evidence instead of degrading to an unsafe or unrelated model.
-- [ ] Add a tool-extension designer that can draft a registered tool, schemas, adapter,
+- [x] Add a tool-extension designer that can draft a registered tool, schemas, adapter,
   OAuth/precondition documentation, tests, and OKF concepts only as an untrusted candidate.
-- [ ] Require an independent Groq review role for security-sensitive or multi-file changes;
+- [x] Require an independent Groq review role for security-sensitive or multi-file changes;
   deterministic validators remain authoritative over model claims.
 
 ### Epic 30.3 — Isolated candidate workspace and evidence
 
-- [ ] Run candidate builds in disposable Git worktrees/containers with no production
+- [~] Run candidate builds in disposable GitHub checkouts with no production
   OAuth/database/deployment credentials, allowlisted network, resource/time limits,
   approved path roots, secret/PII scans, and complete sanitized audit events.
-- [ ] Generate concrete files, content hashes, exact diff, base/candidate commit, validation
+- [x] Generate concrete files, content hashes, exact diff, base/candidate commit, validation
   commands/results, security/privacy report, migration compatibility, and rollback manifest.
-- [ ] Register only reproducible candidates; failed builds remain visible with the exact
+- [x] Register only reproducible candidates; failed builds remain visible with the exact
   breaking point and cannot advance to canary.
 
 ### Epic 30.4 — Trusted GitHub CI and PR handoff
 
-- [ ] Create a draft branch/PR only after the separately confirmed external-publication
+- [x] Create a draft branch/PR only after the separately confirmed external-publication
   action; never publish private evidence or secrets to the public repository.
-- [ ] Run backend/web/Flutter, migration, security, golden, replay, policy, dashboard, and
+- [x] Run backend/web/Flutter, migration, security, golden, replay, policy, dashboard, and
   candidate-specific gates in GitHub Actions; bind evidence to immutable commit/artifact IDs.
-- [ ] Accept validation/deployment evidence only from a trusted CI/deployment identity,
+- [x] Accept validation/deployment evidence only from a trusted CI/deployment identity,
   not a browser-supplied `passed=true`; invalidate approvals after material changes.
 
 Guardrail: a Groq response alone cannot edit trusted main, register a passing candidate,
@@ -574,70 +574,70 @@ create a production tool, deploy, approve, or publish.
 
 ### Epic 31.1 — Stable assignment and version-pinned workers
 
-- [ ] Add immutable executor/policy/prompt/OKF/chunker/candidate/cohort versions to each
+- [x] Add immutable executor/policy/prompt/OKF/chunker/candidate/cohort versions to each
   run and assign eligible users deterministically with allow/deny overrides and sticky sessions.
-- [ ] Separate pilot admission from control/candidate routing. A pilot flag must not be
+- [x] Separate pilot admission from control/candidate routing. A pilot flag must not be
   represented as a version router.
-- [ ] Make control and candidate workers claim only their assigned executor version so
+- [x] Make control and candidate workers claim only their assigned executor version so
   competing deployments cannot execute the same run; pin in-flight runs across rollout changes.
-- [ ] Keep database migrations expand-first/backward-compatible until control retirement.
+- [x] Keep database migrations expand-first/backward-compatible until control retirement.
 
 ### Epic 31.2 — Candidate artifact and Railway deployment controller
 
-- [ ] Build immutable candidate images/artifacts from trusted CI; record source commit,
+- [x] Build immutable candidate images/artifacts from trusted CI; record source commit,
   digest, service/deployment IDs, environment profile, health, smoke results, and expiry.
-- [ ] Add a least-privilege Railway deployment adapter for isolated candidate workers and,
+- [~] Add a least-privilege Railway deployment adapter for isolated candidate workers and,
   only when required, candidate API/frontend surfaces; never alter control during preparation.
-- [ ] Require human approval before production-connected deployment and separate human
+- [x] Require human approval before production-connected deployment and separate human
   activation before assigning real runs.
-- [ ] Verify candidate health and exact version from runtime telemetry before activation.
+- [x] Verify candidate health and exact version from runtime telemetry before activation.
 
 ### Epic 31.3 — Measurement, effective rollback, and promotion
 
-- [ ] Compare minimum-sample control/candidate completion, correctness, cancellation,
+- [x] Compare minimum-sample control/candidate completion, correctness, cancellation,
   side-effect integrity, p95 latency, tokens, quota, verification, and incident rates.
-- [ ] On a safety/quality regression, stop new candidate assignment, route new runs to
+- [x] On a safety/quality regression, stop new candidate assignment, route new runs to
   control, reconcile uncertain writes, preserve evidence, and optionally terminate the
   candidate deployment; database status alone is not rollback.
-- [ ] Require human promotion after a passing measured canary, then deploy/merge the frozen
+- [x] Require human promotion after a passing measured canary, then deploy/merge the frozen
   candidate broadly and retain the last-known-good rollback path.
-- [ ] Provide a deterministic dry-run/local dual-worker simulator before Railway mutation.
+- [~] Provide a deterministic dry-run/local dual-worker simulator before Railway mutation.
 
 Guardrail: canary activation demonstrably changes which immutable executor handles an
 eligible new run, and automatic rollback demonstrably restores control routing.
 
 ## Sprint 32 — Trusted OKF candidates in the improvement lifecycle
 
-- [ ] Treat generated OKF as untrusted drafts with provenance, owner, version, source
+- [x] Treat generated OKF as untrusted drafts with provenance, owner, version, source
   proposal/candidate, content hash, visibility, expiry, and publication status.
-- [ ] Validate OKF v0.1 structure/links, project governance fields, tool references,
+- [x] Validate OKF v0.1 structure/links, project governance fields, tool references,
   secrets/PII, prompt-injection boundaries, replay behavior, and affected workflows.
-- [ ] Require human trusted-publication approval; synchronize only the frozen approved
+- [x] Require human trusted-publication approval; synchronize only the frozen approved
   hash and record the selected OKF version on every run.
-- [ ] Roll back by stopping new selection of the bad OKF version while preserving prior
+- [x] Roll back by stopping new selection of the bad OKF version while preserving prior
   run provenance; a knowledge document cannot add tools/scopes/permissions by itself.
-- [ ] Allow code candidates to include related OKF drafts, but keep code/tool and trusted
+- [x] Allow code candidates to include related OKF drafts, but keep code/tool and trusted
   knowledge approvals explicit and independently auditable.
 
 ## Sprint 33 — Evidence-gated dynamic programming candidates
 
 ### Epic 33.1 — Quantized context knapsack
 
-- [ ] Implement a deterministic quantized 0/1 knapsack candidate after ACL filtering,
+- [x] Implement a deterministic quantized 0/1 knapsack candidate after ACL filtering,
   thresholding, parent dedupe, and diversity preprocessing; use true tokenizer costs,
   reconstruct selected chunks, enforce source caps, and retain greedy fallback.
-- [ ] Bound candidate count, token units, memory, and latency; fall back truthfully when
+- [x] Bound candidate count, token units, memory, and latency; fall back truthfully when
   constraints or time budgets are exceeded.
-- [ ] Compare identical labelled cases against greedy for retrieval/answer/citation quality,
+- [x] Compare identical labelled cases against greedy for retrieval/answer/citation quality,
   latency, tokens, duplication, source coverage, and permission isolation.
 
 ### Epic 33.2 — Later allocation or scheduling experiments
 
-- [ ] Define offline-only multiple-choice knapsack experiments for validated model/workflow
+- [x] Define offline-only multiple-choice knapsack experiments for validated model/workflow
   policies under token/latency/risk constraints; do not let optimization weaken write safety.
-- [ ] Compare DP batch quota allocation against existing admission/reserve/priority
+- [x] Compare DP batch quota allocation against existing admission/reserve/priority
   heuristics before any runtime use; keep heap/queue scheduling for immediate dispatch.
-- [ ] Promote no DP policy without sufficient labelled evidence, passing regression gates,
+- [x] Promote no DP policy without sufficient labelled evidence, passing regression gates,
   bounded latency, human canary approval, and automatic fallback.
 
 Guardrail: DP is an evidence-gated candidate, not a claimed winner and not a substitute
@@ -645,17 +645,17 @@ for deterministic structured Google operations or universal result bounds.
 
 ## Sprint 34 — Extended observability, security, operations, and completion audit
 
-- [ ] Add safe result-budget, candidate-build, theme, assignment, deployment, rollback,
+- [x] Add safe result-budget, candidate-build, theme, assignment, deployment, rollback,
   OKF-publication, and DP metrics/traces/events without high-cardinality labels or content.
-- [ ] Extend Grafana, Neon/DBeaver reporting, alerts, history/export/deletion, retention,
+- [x] Extend Grafana, Neon/DBeaver reporting, alerts, history/export/deletion, retention,
   runbooks, architecture/state diagrams, on-call and external-blocker instructions.
-- [ ] Threat-model Groq prompt injection, malicious candidate patches, sandbox escapes,
+- [~] Threat-model Groq prompt injection, malicious candidate patches, sandbox escapes,
   secret exfiltration, poisoned fixtures, approval replay, CI forgery, worker-version races,
   migration incompatibility, and unsafe rollback.
-- [ ] Run unit/integration/no-network/golden/replay/policy/RAG/DP/candidate/sandbox/migration,
+- [~] Run unit/integration/no-network/golden/replay/policy/RAG/DP/candidate/sandbox/migration,
   Python lint/security/dependency, web, Flutter, Compose, secret/history, CI and production
   smoke gates; verify exact deployed versions and rollback evidence.
-- [ ] Re-audit every Sprint 28–34 story against authoritative files, database state, CI,
+- [~] Re-audit every Sprint 28–34 story against authoritative files, database state, CI,
   deployments, dashboards, and runtime behavior before declaring completion.
 
 ## 5. Required implementation reports
@@ -695,6 +695,12 @@ After implementation and verification, teach through this repository:
 - 2026-07-21: Sprint 32 immutable trusted OKF bundle snapshots, provenance, validation, per-run pinning, and trusted-only retrieval are implemented. Automated OKF draft-to-independent-human-publication remains incomplete and must not be represented as automatic trusted publication.
 - 2026-07-21: Sprint 33 quantized knapsack context packing is implemented behind the disabled `dp_context_packing` flag with exact tokenizer costs, bounded candidates, reconstruction, greedy fallback, and offline comparison. One synthetic case improved evidence value by 0.39 and one tied; 28 policy cases are below the 30-case promotion threshold, so DP is not enabled in production. Model/workflow allocation and batch scheduling remain later experiments.
 - 2026-07-21: Migration 012 round-trips locally; 97 backend tests, 28/28 planner cases, 4/4 workflow replays, Python compile/flake8/Bandit, Next lint/build, Flutter CI, Compose, secret-history, dashboards, and Docker API/worker/builder image gates pass. GitHub CI and deployment pass at `003cea36fd064bb88d33168f86e728ac3d3abaae`; Railway API/worker and Vercel frontend are healthy. Grafana Cloud dashboard publication remains blocked because `GRAFANA_SERVICE_ACCOUNT_TOKEN` is not present locally or in Railway; OTLP/Alloy ingestion credentials are a different credential and remain configured.
+- 2026-07-21: Sprint 28 is completed with metadata-only Gmail sender extraction, universal approved-field result projection, conservative preflight budgeting, and encrypted tenant-scoped private result references with expiry/export/deletion rules. Tokenizer initialization is now image-baked and lazily fail-safe so a first-run CDN interruption cannot crash API or workers; DP falls back to greedy when exact tokenization is unavailable.
+- 2026-07-21: Sprint 29 now preserves occurrence -> versioned concrete cluster -> evidence-thresholded architectural theme. Rejected, expired, rolled-back, and failed-build theme candidates release the theme for later evidence; only production attestation resolves it. The category-only generator is retained for historical compatibility but is absent from the live analyzer loop.
+- 2026-07-21: Sprint 30 has bounded Groq repository tools, adaptive roles, independent review for multi-role work, tool-extension design surfaces, frozen hashes/diffs, and trusted multi-job CI attestation. Generation runs in an ephemeral credential-minimal GitHub checkout and has no production OAuth, Neon, or Railway credentials; a hardened container-level egress sandbox remains a follow-up defense-in-depth item.
+- 2026-07-21: Sprint 31 now has a separate dormant Railway candidate project/service, exact source/digest/runtime readiness attestation, version-specific worker claims, applicability-bounded routing, cleanup scaling, measured rollback, and production API+worker attestation. Worker-compatible code, prompt/config, and OKF candidates are operationally modelled; planner/API/frontend code candidates remain blocked until an isolated candidate API/gateway or worker-side planning path exists. No real candidate was deployed or activated without human approval.
+- 2026-07-21: Sprint 32 independent OKF publication approval is implemented for pure and mixed code/knowledge candidates, including immutable overlays, governance/tool/secret/PII/injection validation, canary/trusted/rollback lifecycle, per-run pinning, portal controls, and reporting. Knowledge cannot add executable authority.
+- 2026-07-21: Migration 013 round-trips 013 -> 012 -> 013. Current local evidence is 108 total tests, 28/28 planner cases, 4/4 no-network workflow replays, clean compile/flake8/Bandit, 24 valid Prometheus alert rules, valid dashboards/Compose, Next lint/build, Flutter analyze/test/debug APK, no-network API/worker/builder imports, and healthy rebuilt Docker API/worker/Prometheus/Grafana. The dependency audit service timed out against both PyPI and OSV and must be revalidated by trusted CI. DP context packing remains disabled: only two packing cases exist and the 28-case policy sample is below the 30-case promotion floor. Offline multiple-choice workflow and periodic quota DP now pass their bounded risk/fairness fixtures but have no live authority.
 - 2026-07-19: Audited the production RAG migration and found 1,152 Gmail plus 13,367 Drive legacy vectors but zero tenant-safe chunks. Added a dry-run/apply/rollback importer that assigns legacy vectors only to an explicit original owner with ACL and lineage; it never makes old single-user data globally searchable.
 - 2026-07-19: Applied the reversible legacy import for the documented original owner: 14,521 tenant-scoped chunks (1,152 Gmail, 13,367 Drive, 2 Calendar). A live hybrid query returned owner results while the same query for an unrelated user returned zero, proving cross-user isolation.
 - 2026-07-19: Replaced generic service execution steps with explicit validated operations and per-step tool allowlists, while preserving mixed-workflow dependencies and read retry semantics. Added verified Drive trash support. Deploy workflow now labels API and worker with the exact Git commit automatically.

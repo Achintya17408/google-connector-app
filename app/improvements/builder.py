@@ -12,47 +12,18 @@ from groq import AsyncGroq
 
 from app.config.settings import get_settings
 from app.improvements.candidates import (
-    candidate_digest, file_digest, validate_candidate_files,
+    ALLOWED_ROOTS, candidate_digest, file_digest, infer_candidate_kind,
+    validate_candidate_files,
 )
+from app.improvements.builder_tools import BoundedRepositoryTools
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_POLICY_VERSION = "adaptive-roles-v1"
 TOOL_POLICY_VERSION = "bounded-repo-tools-v1"
 
-COMPONENT_PATHS = {
-    "typed_planner": ["app/runs/planner.py", "tests/unit/test_core.py"],
-    "request_planner": ["app/runs/planner.py", "app/runs/repository.py", "tests/unit/test_core.py"],
-    "executor_context_builder": [
-        "app/agents/supervisor.py", "app/agents/context_budget.py",
-        "app/tools/result_projection.py", "tests/unit/test_core.py",
-    ],
-    "durable_worker": ["app/runs/worker.py", "tests/unit/test_core.py"],
-    "step_executor": ["app/runs/worker.py", "app/agents/supervisor.py", "tests/unit/test_core.py"],
-}
-
-
 def choose_builder_mode(risk_level: str, change_scope: list[str]) -> str:
     return "multi_role" if risk_level in {"high", "critical"} or len(change_scope) > 3 else "single"
-
-
-def _bounded_sources(component: str, change_scope: list[str]) -> list[dict]:
-    paths = list(COMPONENT_PATHS.get(component, []))
-    for scope in change_scope:
-        normalized = scope.strip().replace(" ", "_")
-        candidate = f"app/{normalized}.py"
-        if (ROOT / candidate).is_file():
-            paths.append(candidate)
-    output = []
-    total = 0
-    for path in dict.fromkeys(paths):
-        content = (ROOT / path).read_text()
-        if total + len(content) > 120_000:
-            continue
-        output.append({"path": path, "content": content})
-        total += len(content)
-    return output
-
 
 async def enqueue_candidate_build(pool, proposal_id, incident: dict, option: dict, actor: str):
     settings = get_settings()
@@ -75,23 +46,31 @@ async def enqueue_candidate_build(pool, proposal_id, incident: dict, option: dic
                 "stage": incident["stage"], "category": incident["category"],
                 "component": incident["component"], "service": incident["service"],
                 "operation": incident["operation"], "root_cause": incident["root_cause"],
+                "request_shape": incident.get("request_shape") or {},
                 "selected_option": option, "contains_raw_user_content": False,
             }), actor,
         )
 
 
 def _candidate_prompt(job: dict, sources: list[dict], role: str) -> str:
+    reviewing = role == "independent_safety_reviewer"
     return json.dumps({
         "role": role,
         "objective": (
-            "Produce a minimal implementation candidate and regression tests. Return JSON only "
-            "with files[{path,change_type,content}], exact_diff, rollback_plan, validation_commands, notes."
+            "Independently reject or revise the supplied candidate. Return JSON only with "
+            "approved, reason, and optional revised_candidate."
+            if reviewing else
+            "Inspect through the bounded repository tools, stage a minimal implementation and "
+            "regression tests, then return JSON only with files[{path,change_type,content}], "
+            "exact_diff, rollback_plan, validation_commands, notes."
         ),
         "rules": [
             "Use only supplied repository paths or create files under app/, tests/, knowledge/, config/, docs/.",
             "Never include secrets, credentials, raw user content, shell commands, network calls, or production mutations.",
             "Do not claim tests passed. CI validates the frozen candidate separately.",
             "Preserve unrelated behavior and include a no-network regression for the reported failure.",
+            "Tool calls can only read or stage in memory; they cannot execute, publish, or authorize changes.",
+            "For a new tool include schema, least scopes, adapter, registry, projection, verifier, tests, and draft OKF.",
         ],
         "incident": job["sanitized_input"], "sources": sources,
     }, default=str)
@@ -112,24 +91,102 @@ async def _groq_json(job: dict, sources: list[dict], role: str) -> tuple[dict, i
     return data, int((usage.prompt_tokens or 0) + (usage.completion_tokens or 0))
 
 
+async def _groq_tool_json(
+    job: dict, tools: BoundedRepositoryTools, role: str,
+    prior_candidate: dict | None = None,
+) -> tuple[dict, int]:
+    """Run a bounded tool loop; Groq never receives a shell or network tool."""
+    settings = get_settings()
+    client = AsyncGroq(api_key=settings.groq_api_key)
+    messages = [{
+        "role": "user",
+        "content": _candidate_prompt(
+            job,
+            ([{"candidate_for_revision": prior_candidate}] if prior_candidate else [{
+                "repository": "ephemeral checkout",
+                "approved_roots": list(ALLOWED_ROOTS),
+                "read_limit_bytes": tools.max_read_bytes,
+                "tool_call_limit": tools.max_calls,
+                "changed_file_limit": tools.max_files,
+            }]),
+            role,
+        ),
+    }]
+    tokens = 0
+    for _ in range(12):
+        if tokens >= job["token_budget"]:
+            raise RuntimeError("Candidate token budget exhausted during tool reasoning")
+        remaining = max(256, job["token_budget"] - tokens)
+        response = await client.chat.completions.create(
+            model=job["model_name"], messages=messages,
+            tools=tools.schemas(), tool_choice="auto", temperature=0.1,
+            max_tokens=min(settings.candidate_builder_max_output_tokens, remaining),
+        )
+        usage = response.usage
+        tokens += int((usage.prompt_tokens or 0) + (usage.completion_tokens or 0))
+        message = response.choices[0].message
+        if message.tool_calls:
+            calls = [{
+                "id": call.id, "type": "function",
+                "function": {
+                    "name": call.function.name,
+                    "arguments": call.function.arguments,
+                },
+            } for call in message.tool_calls]
+            messages.append({
+                "role": "assistant", "content": message.content or "",
+                "tool_calls": calls,
+            })
+            for call in message.tool_calls:
+                try:
+                    arguments = json.loads(call.function.arguments or "{}")
+                    result = tools.execute(call.function.name, arguments)
+                except Exception as exc:
+                    result = {"error": type(exc).__name__, "detail": str(exc)[:500]}
+                messages.append({
+                    "role": "tool", "tool_call_id": call.id,
+                    "name": call.function.name,
+                    "content": json.dumps(result, default=str)[:120_000],
+                })
+            continue
+        try:
+            candidate = json.loads(message.content or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Groq candidate output was not valid JSON") from exc
+        if tools.staged_files():
+            candidate["files"] = tools.staged_files()
+            candidate.setdefault("exact_diff", tools.diff()["diff"])
+        return candidate, tokens
+    raise RuntimeError("Candidate builder exceeded its bounded reasoning/tool rounds")
+
+
 async def generate_candidate_draft(job: dict) -> tuple[dict, int, list[str]]:
     """Generate a patch from sanitized facts and a bounded checkout only."""
     sanitized = dict(job["sanitized_input"] or {})
-    sources = _bounded_sources(
-        sanitized.get("component", ""),
-        sanitized.get("selected_option", {}).get("change_scope", []),
+    scope = sanitized.get("selected_option", {}).get("change_scope", [])
+    tool_extension = any(
+        "tool" in value.casefold() for value in [sanitized.get("component", ""), *scope]
     )
-    roles = ["coordinator"] if job["mode"] == "single" else [
-        "investigator_and_patch_author", "independent_safety_reviewer",
-    ]
+    first_role = "tool_extension_designer" if tool_extension else (
+        "coordinator" if job["mode"] == "single" else "investigator_and_patch_author"
+    )
+    roles = [first_role] + (
+        ["independent_safety_reviewer"] if job["mode"] == "multi_role" else []
+    )
+    repository_tools = BoundedRepositoryTools(ROOT)
     candidate = None
     tokens = 0
     for role in roles:
         if tokens >= job["token_budget"]:
             raise RuntimeError("Candidate token budget exhausted before review")
-        output, used = await _groq_json(
-            job, sources if candidate is None else [{"candidate_for_review": candidate}], role,
-        )
+        if role == "independent_safety_reviewer":
+            output, used = await _groq_json(
+                job, [{"candidate_for_review": candidate}], role,
+            )
+        else:
+            output, used = await _groq_tool_json(
+                job, repository_tools, role, candidate,
+            )
         tokens += used
         if role == "independent_safety_reviewer":
             if output.get("approved") is False:
@@ -167,9 +224,10 @@ async def store_candidate_draft(
             "commands": candidate.get("validation_commands") or [],
             "builder_did_not_execute_code": True,
         }
+        candidate_kind = infer_candidate_kind(files)
         digest = candidate_digest(
             job["base_commit"], files, validation,
-            candidate_kind="code", candidate_version=f"build-{job['id']}",
+            candidate_kind=candidate_kind, candidate_version=f"build-{job['id']}",
             exact_diff=exact_diff, rollback_plan=rollback,
         )
         await conn.execute(
@@ -202,15 +260,26 @@ async def store_candidate_draft(
             tokens, digest, json.dumps({"roles_completed": roles}), job["id"],
         )
         await conn.execute(
-            """UPDATE improvement_proposals SET candidate_kind='code',
-               candidate_state='implementation_draft',candidate_version=$1,
-               exact_diff=$2,rollback_plan=$3::jsonb,validation_report=$4::jsonb,
-               candidate_manifest=$5::jsonb,content_hash=$6,updated_at=now()
-               WHERE id=$7""",
-            f"build-{job['id']}", exact_diff, json.dumps(rollback),
+            """UPDATE improvement_proposals SET candidate_kind=$1,
+               candidate_state='implementation_draft',candidate_version=$2,
+               exact_diff=$3,rollback_plan=$4::jsonb,validation_report=$5::jsonb,
+               candidate_manifest=$6::jsonb,content_hash=$7,updated_at=now()
+               WHERE id=$8""",
+            candidate_kind, f"build-{job['id']}", exact_diff, json.dumps(rollback),
             json.dumps(validation), json.dumps({
                 "build_id": str(job["id"]), "mode": job["mode"],
                 "model": job["model_name"], "tool_policy": TOOL_POLICY_VERSION,
+                "applicability": {
+                    "services": [job["sanitized_input"].get("service")]
+                    if job["sanitized_input"].get("service") else [],
+                    "operations": [job["sanitized_input"].get("operation")]
+                    if job["sanitized_input"].get("operation") else [],
+                    "rag_modes": [
+                        (job["sanitized_input"].get("request_shape") or {}).get(
+                            "rag_mode", "none"
+                        )
+                    ],
+                },
                 "canary_eligible": False,
             }), digest, job["proposal_id"],
         )
@@ -233,17 +302,26 @@ async def process_one_candidate_build(pool) -> bool:
         )
     job = dict(row)
     try:
-        candidate, tokens, roles = await generate_candidate_draft(job)
+        candidate, tokens, roles = await asyncio.wait_for(
+            generate_candidate_draft(job),
+            timeout=get_settings().candidate_builder_timeout_seconds,
+        )
         await store_candidate_draft(pool, job["id"], candidate, tokens, roles)
         return True
     except Exception as exc:
         logger.exception("Candidate build %s failed", job["id"])
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """UPDATE candidate_builds SET status='failed',error_message=$1,
                    updated_at=now(),completed_at=now() WHERE id=$2""",
                 str(exc)[:2000], job["id"],
             )
+            proposal = await conn.fetchrow(
+                "SELECT * FROM improvement_proposals WHERE id=$1", job["proposal_id"],
+            )
+            if proposal:
+                from app.improvements.failure_intelligence import release_theme_for_proposal
+                await release_theme_for_proposal(conn, dict(proposal))
         return True
 
 
