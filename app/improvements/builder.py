@@ -91,6 +91,7 @@ async def _candidate_completion(client: AsyncGroq, job: dict, **kwargs):
                     kwargs = dict(kwargs)
                     kwargs["temperature"] = 0.0
                     kwargs["parallel_tool_calls"] = False
+                    kwargs["disable_tool_validation"] = True
                     continue
                 raise
     assert last_error is not None
